@@ -1,0 +1,45 @@
+{
+    "manifest_version": 3,
+    "name": "PriceWatch",
+    "description": "Smart Price tracking and Analysis",
+    "version": "1.0.0",
+    "permissions": [
+        "activeTab",
+        "storage",
+        "alarms",
+        "notifications",
+        "identity"
+    ],
+    "host_permissions": [
+        "https://*.amazon.in/*",
+        "https://*.flipkart.com/*",
+        "https://*.reliancedigital.in/*",
+        "http://localhost:8000/*"
+    ],
+    "oauth2": {
+        "client_id": "490553520236-cvoekm0tqqu166jufm8klkcr4k64cb67.apps.googleusercontent.com",
+        "scopes": [
+            "https://www.googleapis.com/auth/userinfo.email",
+            "https://www.googleapis.com/auth/userinfo.profile"
+        ]
+    },
+    "action": {
+        "default_popup": "popup.html"
+    },
+    "background": {
+        "service_worker": "bg.js"
+    },
+    "content_scripts": [
+        {
+            "matches": [
+                "https://*.amazon.in/*",
+                "https://*.flipkart.com/*",
+                "https://*.reliancedigital.in/*"
+            ],
+            "js": [
+                "content.js"
+            ],
+            "run_at": "document_idle"
+        }
+    ]
+}

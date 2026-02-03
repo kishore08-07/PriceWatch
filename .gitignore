@@ -1,0 +1,21 @@
+# Dependencies (All folders)
+**/node_modules/
+
+# Environment variables (All folders)
+**/.env
+**/.env.*
+
+# Build outputs
+/extension/dist/
+
+# Python (ai-service)
+**/__pycache__/
+**/*.pyc
+
+# Logs
+**/[^.]*.log
+
+# Editor and OS specific
+.vscode/
+.idea/
+.DS_Store
