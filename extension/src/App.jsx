@@ -43,8 +43,8 @@ const Icons = {
       <path d="M12 2v20M2 12h20M4.93 4.93l14.14 14.14M19.07 4.93L4.93 19.07" />
     </svg>
   ),
-  AlertCircle: () => (
-    <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+  AlertCircle: ({ size = 48 }) => (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
       <circle cx="12" cy="12" r="10" />
       <line x1="12" y1="8" x2="12" y2="12" />
       <line x1="12" y1="16" x2="12.01" y2="16" />
@@ -68,6 +68,19 @@ const Icons = {
     <svg className="spinner-icon" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
       <path d="M21 12a9 9 0 1 1-6.219-8.56" />
     </svg>
+  ),
+  Trash: () => (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+      <polyline points="3 6 5 6 21 6" />
+      <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+    </svg>
+  ),
+  ExternalLink: () => (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+      <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
+      <polyline points="15 3 21 3 21 9" />
+      <line x1="10" y1="14" x2="21" y2="3" />
+    </svg>
   )
 };
 
@@ -77,6 +90,10 @@ function App() {
   const [isTracking, setIsTracking] = useState(false);
   const [user, setUser] = useState(null);
   const [error, setError] = useState(null);
+  const [validationError, setValidationError] = useState('');
+  const [existingAlert, setExistingAlert] = useState(null);
+  const [isInputFocused, setIsInputFocused] = useState(false);
+  const [trackedProducts, setTrackedProducts] = useState([]);
 
   const fetchData = () => {
     setError(null);
@@ -98,13 +115,36 @@ function App() {
           return;
         }
 
+
         if (response && response.name && response.price) {
           setProduct(response);
           clearTimeout(fetchTimeout);
-          chrome.storage.local.get(['trackedProducts'], (result) => {
+
+          // Check both local storage and backend for existing alerts
+          chrome.storage.local.get(['userEmail', 'trackedProducts'], (result) => {
             const tracked = result.trackedProducts || [];
-            const isAlreadyTracked = tracked.some(p => p.name === response.name);
+            const isAlreadyTracked = tracked.some(p => p.url === response.url);
             setIsTracking(isAlreadyTracked);
+
+            // If user is logged in, also check backend for existing alert
+            if (result.userEmail && response.url) {
+              const encodedUrl = encodeURIComponent(response.url);
+              fetch(`http://localhost:8000/api/tracker/check/${result.userEmail}/${encodedUrl}`)
+                .then(res => res.json())
+                .then(data => {
+                  if (data.exists && data.tracking) {
+                    setIsTracking(true);
+                    setExistingAlert(data.tracking);
+                    // Pre-fill target price if alert exists
+                    setTargetPrice(data.tracking.targetPrice.toString());
+                    console.log("Existing alert found:", data.tracking);
+                  }
+                })
+                .catch(err => {
+                  console.log("Could not check for existing alert:", err);
+                  // Don't show error to user, just continue
+                });
+            }
           });
         } else {
           setError("Product information unavailable. Please refresh and ensure you're viewing a product page.");
@@ -113,14 +153,36 @@ function App() {
     });
   };
 
-  useEffect(() => {
-    fetchData();
-
-    chrome.storage.local.get(['userEmail'], (result) => {
+  const fetchTrackedProducts = () => {
+    chrome.storage.local.get(['userEmail', 'trackedProducts'], (result) => {
       if (result.userEmail) {
         setUser({ email: result.userEmail });
       }
+      if (result.trackedProducts) {
+        // Remove duplicates based on URL
+        const uniqueProducts = [];
+        const seenUrls = new Set();
+        
+        result.trackedProducts.forEach(product => {
+          if (!seenUrls.has(product.url)) {
+            seenUrls.add(product.url);
+            uniqueProducts.push(product);
+          }
+        });
+        
+        // Update storage if duplicates were found
+        if (uniqueProducts.length !== result.trackedProducts.length) {
+          chrome.storage.local.set({ trackedProducts: uniqueProducts });
+        }
+        
+        setTrackedProducts(uniqueProducts);
+      }
     });
+  };
+
+  useEffect(() => {
+    fetchData();
+    fetchTrackedProducts();
   }, []);
 
   const handleLogin = (onSuccess = null) => {
@@ -147,8 +209,66 @@ function App() {
     });
   };
 
+  const validateTargetPrice = (value) => {
+    if (!value || value.trim() === '') {
+      setValidationError('');
+      return false;
+    }
+
+    const parsedValue = parseFloat(value);
+
+    if (isNaN(parsedValue)) {
+      setValidationError('Please enter a valid number');
+      return false;
+    }
+
+    if (parsedValue <= 0) {
+      setValidationError('Price must be greater than ₹0');
+      return false;
+    }
+
+    if (product && parsedValue > product.price) {
+      setValidationError(`Must be ≤ current price (${product.currency}${product.price})`);
+      return false;
+    }
+
+    setValidationError('');
+    return true;
+  };
+
+  const handleTargetPriceChange = (e) => {
+    const value = e.target.value;
+    setTargetPrice(value);
+    validateTargetPrice(value);
+  };
+
   const handleTrack = () => {
-    if (!targetPrice) return;
+    // Validate target price exists
+    if (!targetPrice) {
+      setError("Please enter a target price");
+      setValidationError("Target price is required");
+      return;
+    }
+
+    // Validate target price is a positive number
+    const parsedTargetPrice = parseFloat(targetPrice);
+    if (isNaN(parsedTargetPrice) || parsedTargetPrice <= 0) {
+      setError("Target price must be a positive number");
+      setValidationError("Price must be greater than ₹0");
+      return;
+    }
+
+    // Validate target price is less than or equal to current price
+    if (parsedTargetPrice > product.price) {
+      setError(`Target price cannot be greater than current price (${product.currency}${product.price})`);
+      setValidationError(`Must be ≤ ${product.currency}${product.price}`);
+      return;
+    }
+
+    // Clear any previous errors
+    setError(null);
+    setValidationError('');
+
 
     if (!user) {
       handleLogin((authenticatedUser) => {
@@ -168,28 +288,98 @@ function App() {
       platform: product.platform,
       image: product.image,
       currency: product.currency,
-      targetPrice: parseInt(targetPrice),
+      targetPrice: parseFloat(targetPrice),
       userEmail: email
     };
 
-    chrome.storage.local.get(['trackedProducts'], (result) => {
-      const tracked = result.trackedProducts || [];
-      tracked.push(trackingData);
-      chrome.storage.local.set({ trackedProducts: tracked }, () => {
-        setIsTracking(true);
-        fetch('http://localhost:8000/api/tracker/add', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(trackingData)
-        })
-          .then(res => res.json())
-          .then(data => {
-            if (data.success) {
-              console.log("Price tracking activated");
+    // First, send to backend for validation and duplicate checking
+    fetch('http://localhost:8000/api/tracker/add', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(trackingData)
+    })
+      .then(res => {
+        if (!res.ok) {
+          // Handle HTTP errors
+          return res.json().then(errorData => {
+            throw new Error(errorData.message || 'Failed to set price alert');
+          });
+        }
+        return res.json();
+      })
+      .then(data => {
+        if (data.success) {
+          console.log("Price tracking activated:", data.message);
+
+          // Update local storage only after successful backend save
+          chrome.storage.local.get(['trackedProducts'], (result) => {
+            const tracked = result.trackedProducts || [];
+
+            // Check if product already exists in local storage
+            const existingIndex = tracked.findIndex(p => p.url === product.url);
+
+            if (existingIndex !== -1) {
+              // Update existing entry
+              tracked[existingIndex] = trackingData;
+              console.log("Updated existing local tracking entry");
+            } else {
+              // Add new entry
+              tracked.push(trackingData);
+              console.log("Added new local tracking entry");
             }
-          })
-          .catch(err => console.error("Sync error", err));
+
+            chrome.storage.local.set({ trackedProducts: tracked }, () => {
+              setIsTracking(true);
+              fetchTrackedProducts();
+              // Clear target price input and show success (optional)
+              // setTargetPrice('');
+            });
+          });
+        } else {
+          setError(data.message || 'Failed to set price alert');
+        }
+      })
+      .catch(err => {
+        console.error("Tracking error:", err);
+
+        // Handle specific error types
+        if (err.message.includes('Failed to fetch') || err.message.includes('NetworkError')) {
+          setError("Network error. Please check your connection and ensure the backend server is running.");
+        } else if (err.message.includes('401') || err.message.includes('authentication')) {
+          setError("Session expired. Please sign in again.");
+          setUser(null);
+          chrome.storage.local.remove(['userEmail']);
+        } else {
+          setError(err.message || "Failed to set price alert. Please try again.");
+        }
       });
+  };
+
+  const handleRemoveTracking = (item, index) => {
+    // Remove from backend if user is logged in
+    if (user?.email) {
+      const encodedUrl = encodeURIComponent(item.url);
+      fetch(`http://localhost:8000/api/tracker/remove/${user.email}/${encodedUrl}`, {
+        method: 'DELETE'
+      })
+        .then(res => res.json())
+        .then(data => {
+          console.log('Removed from backend:', data);
+        })
+        .catch(err => {
+          console.error('Failed to remove from backend:', err);
+        });
+    }
+
+    // Remove from local storage
+    const updated = trackedProducts.filter((_, i) => i !== index);
+    chrome.storage.local.set({ trackedProducts: updated }, () => {
+      setTrackedProducts(updated);
+      if (product && item.url === product.url) {
+        setIsTracking(false);
+        setExistingAlert(null);
+        setTargetPrice('');
+      }
     });
   };
 
@@ -247,24 +437,59 @@ function App() {
                 <Icons.TrendingDown />
                 <span>Target Price Alert</span>
               </label>
-              <div className="input-group">
+
+              {/* Show existing alert info when updating */}
+              {existingAlert && (
+                <div className="existing-alert-info">
+                  <span className="info-badge">
+                    <Icons.Check />
+                    Active alert: {product.currency}{existingAlert.targetPrice}
+                  </span>
+                  <span className="info-subtitle">Update to a new target price below</span>
+                </div>
+              )}
+
+              {/* Helper text showing valid range */}
+              {!existingAlert && (
+                <div className="input-helper">
+                  <span className="helper-text">
+                    Enter a price between {product.currency}1 and {product.currency}{product.price.toLocaleString()}
+                  </span>
+                </div>
+              )}
+
+              <div className={`input-group ${validationError ? 'error' : ''} ${isInputFocused ? 'focused' : ''}`}>
                 <span className="currency-prefix">{product.currency}</span>
                 <input
                   type="number"
-                  placeholder="Enter your target price"
+                  placeholder={existingAlert ? "Enter new target price" : "Enter your target price"}
                   value={targetPrice}
-                  onChange={(e) => setTargetPrice(e.target.value)}
+                  onChange={handleTargetPriceChange}
+                  onFocus={() => setIsInputFocused(true)}
+                  onBlur={() => setIsInputFocused(false)}
+                  min="1"
+                  max={product.price}
+                  step="1"
                 />
               </div>
+
+              {/* Real-time validation feedback */}
+              {validationError && (
+                <div className="validation-error">
+                  <Icons.AlertCircle size={16} />
+                  <span>{validationError}</span>
+                </div>
+              )}
+
               <button
-                className={`btn btn-primary w-full ${isTracking ? 'active' : ''}`}
+                className={`btn btn-primary w-full ${isTracking ? 'btn-update' : ''}`}
                 onClick={handleTrack}
-                disabled={!targetPrice}
+                disabled={!targetPrice || !!validationError}
               >
                 {isTracking ? (
                   <>
                     <Icons.Check />
-                    <span>Price Alert Active</span>
+                    <span>Update Price Alert</span>
                   </>
                 ) : (
                   <>
@@ -318,10 +543,56 @@ function App() {
 
         <section className="watchlist-section">
           <h3 className="section-title">Active Watchlist</h3>
-          <div className="empty-watchlist">
-            <p className="empty-text">No products being tracked</p>
-            <span className="empty-subtext">Add products to receive price drop alerts</span>
-          </div>
+          {trackedProducts.length > 0 ? (
+            <div className="watchlist-items">
+              {trackedProducts.map((item, index) => (
+                <div key={index} className="watchlist-item glass">
+                  <div className="watchlist-item-image">
+                    {item.image ? (
+                      <img src={item.image} alt={item.productName} />
+                    ) : (
+                      <div className="img-placeholder">
+                        <Icons.Package />
+                      </div>
+                    )}
+                  </div>
+                  <div className="watchlist-item-details">
+                    <h4 className="watchlist-item-name">{item.productName}</h4>
+                    <div className="watchlist-item-prices">
+                      <div className="price-info">
+                        <span className="price-info-label">Current</span>
+                        <span className="price-info-value">{item.currency}{item.currentPrice}</span>
+                      </div>
+                      <div className="price-divider">→</div>
+                      <div className="price-info target">
+                        <span className="price-info-label">Target</span>
+                        <span className="price-info-value">{item.currency}{item.targetPrice}</span>
+                      </div>
+                    </div>
+                    <div className="watchlist-item-meta">
+                      <span className="platform-tag">{item.platform}</span>
+                      <a href={item.url} target="_blank" rel="noopener noreferrer" className="view-product-link">
+                        <Icons.ExternalLink />
+                        <span>View</span>
+                      </a>
+                    </div>
+                  </div>
+                  <button 
+                    className="remove-btn"
+                    onClick={() => handleRemoveTracking(item, index)}
+                    title="Remove from watchlist"
+                  >
+                    <Icons.Trash />
+                  </button>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="empty-watchlist">
+              <p className="empty-text">No products being tracked</p>
+              <span className="empty-subtext">Add products to receive price drop alerts</span>
+            </div>
+          )}
         </section>
       </main>
 

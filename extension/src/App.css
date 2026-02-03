@@ -113,7 +113,7 @@
 
 /* Product Card */
 .product-card {
-  padding: 20px;
+  padding: 24px;
   position: relative;
   overflow: hidden;
 }
@@ -213,7 +213,7 @@
 .track-controls {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 16px;
 }
 
 .input-label {
@@ -230,13 +230,55 @@
   color: var(--accent);
 }
 
+/* Existing Alert Info */
+.existing-alert-info {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px;
+  background: rgba(16, 185, 129, 0.08);
+  border: 1px solid rgba(16, 185, 129, 0.2);
+  border-radius: 10px;
+}
+
+.info-badge {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.85rem;
+  color: #10b981;
+  font-weight: 600;
+}
+
+.info-badge svg {
+  width: 16px;
+  height: 16px;
+}
+
+.info-subtitle {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  margin-left: 24px;
+}
+
+/* Input Helper */
+.input-helper {
+  margin-top: -8px;
+}
+
+.helper-text {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  line-height: 1.4;
+}
+
 .input-group {
   display: flex;
   align-items: center;
   background: rgba(0, 0, 0, 0.3);
   border: 1.5px solid var(--glass-border);
   border-radius: 10px;
-  padding: 10px 14px;
+  padding: 12px 16px;
   transition: all 0.3s ease;
 }
 
@@ -244,6 +286,15 @@
   border-color: var(--primary);
   background: rgba(0, 0, 0, 0.4);
   box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.1);
+}
+
+.input-group.error {
+  border-color: var(--danger);
+  background: rgba(239, 68, 68, 0.05);
+}
+
+.input-group.error:focus-within {
+  box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.1);
 }
 
 .currency-prefix {
@@ -269,6 +320,24 @@
   opacity: 0.6;
 }
 
+/* Validation Error */
+.validation-error {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: 0.75rem;
+  color: var(--danger);
+  line-height: 1.4;
+  margin-top: -8px;
+}
+
+.validation-error svg {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+
 /* Buttons */
 .btn {
   display: flex;
@@ -291,22 +360,27 @@
 }
 
 .btn-primary {
-  background: var(--primary);
+  background: linear-gradient(135deg, var(--primary) 0%, #8b5cf6 100%);
   color: white;
+  box-shadow: 0 2px 8px rgba(99, 102, 241, 0.3);
 }
 
 .btn-primary:not(:disabled):hover {
-  background: #5558dd;
-  transform: translateY(-1px);
-  box-shadow: 0 4px 12px rgba(99, 102, 241, 0.4);
+  transform: translateY(-2px);
+  box-shadow: 0 4px 16px rgba(99, 102, 241, 0.5);
 }
 
-.btn-primary.active {
-  background: #10b981;
+.btn-primary:not(:disabled):active {
+  transform: translateY(0);
 }
 
-.btn-primary.active:hover {
-  background: #059669;
+.btn-primary.btn-update {
+  background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+  box-shadow: 0 2px 8px rgba(16, 185, 129, 0.3);
+}
+
+.btn-primary.btn-update:not(:disabled):hover {
+  box-shadow: 0 4px 16px rgba(16, 185, 129, 0.5);
 }
 
 .btn-secondary {
@@ -384,7 +458,7 @@
 
 /* Watchlist Section */
 .watchlist-section {
-  margin-top: 8px;
+  margin-top: 4px;
 }
 
 .section-title {
@@ -394,6 +468,170 @@
   text-transform: uppercase;
   letter-spacing: 0.05em;
   margin: 0 0 12px 0;
+}
+
+.watchlist-items {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  max-height: 300px;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.watchlist-item {
+  padding: 16px;
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  position: relative;
+  transition: all 0.2s ease;
+}
+
+.watchlist-item:hover {
+  background: rgba(255, 255, 255, 0.08);
+  transform: translateX(2px);
+}
+
+.watchlist-item-image {
+  width: 60px;
+  height: 60px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 8px;
+  border: 1px solid var(--glass-border);
+  overflow: hidden;
+}
+
+.watchlist-item-image img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+}
+
+.watchlist-item-image .img-placeholder {
+  color: var(--text-muted);
+  opacity: 0.5;
+}
+
+.watchlist-item-image .img-placeholder svg {
+  width: 32px;
+  height: 32px;
+}
+
+.watchlist-item-details {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.watchlist-item-name {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: white;
+  margin: 0;
+  line-height: 1.3;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.watchlist-item-prices {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.price-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.price-info-label {
+  font-size: 0.65rem;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.price-info-value {
+  font-size: 0.9rem;
+  font-weight: 700;
+  color: white;
+}
+
+.price-info.target .price-info-value {
+  color: var(--accent);
+}
+
+.price-divider {
+  color: var(--text-muted);
+  font-size: 0.9rem;
+  opacity: 0.5;
+}
+
+.watchlist-item-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.platform-tag {
+  background: rgba(99, 102, 241, 0.15);
+  border: 1px solid rgba(99, 102, 241, 0.3);
+  color: var(--primary);
+  padding: 4px 8px;
+  border-radius: 6px;
+  font-size: 0.65rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.view-product-link {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  text-decoration: none;
+  transition: all 0.2s ease;
+  padding: 4px 8px;
+  border-radius: 6px;
+}
+
+.view-product-link:hover {
+  color: var(--primary);
+  background: rgba(99, 102, 241, 0.1);
+}
+
+.remove-btn {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  background: rgba(239, 68, 68, 0.1);
+  border: 1px solid rgba(239, 68, 68, 0.2);
+  color: var(--danger);
+  padding: 6px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.remove-btn:hover {
+  background: rgba(239, 68, 68, 0.2);
+  border-color: rgba(239, 68, 68, 0.4);
+  transform: scale(1.05);
 }
 
 .empty-watchlist {
