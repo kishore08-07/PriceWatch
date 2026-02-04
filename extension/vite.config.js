@@ -10,22 +10,29 @@ export default defineConfig({
     {
       name: 'copy-extension-files',
       closeBundle() {
-        // Copy extension files from public to dist after build
-        const filesToCopy = ['manifest.json', 'content.js', 'bg.js'];
-        filesToCopy.forEach(file => {
-          copyFileSync(
-            resolve(__dirname, 'public', file),
-            resolve(__dirname, 'dist', file)
-          );
-        });
-        console.log('✓ Extension files copied to dist/');
+        // Copy manifest.json from public to dist
+        copyFileSync(
+          resolve(__dirname, 'public', 'manifest.json'),
+          resolve(__dirname, 'dist', 'manifest.json')
+        );
+        console.log('✓ Manifest copied to dist/');
       }
     }
   ],
   build: {
     rollupOptions: {
       input: {
-        popup: 'popup.html'
+        popup: 'popup.html',
+        content: resolve(__dirname, 'src/content/index.js'),
+        background: resolve(__dirname, 'src/background/index.js')
+      },
+      output: {
+        entryFileNames: (chunkInfo) => {
+          // Keep content.js and bg.js as their original names
+          if (chunkInfo.name === 'content') return 'content.js';
+          if (chunkInfo.name === 'background') return 'bg.js';
+          return 'assets/[name]-[hash].js';
+        }
       }
     }
   }
