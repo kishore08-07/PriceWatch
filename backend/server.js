@@ -232,26 +232,21 @@ app.delete('/api/tracker/remove/:email/:url', async (req, res) => {
         const { email, url } = req.params;
         const decodedUrl = decodeURIComponent(url);
 
-        const tracking = await Tracking.findOne({
+        const result = await Tracking.deleteOne({
             userEmail: email,
             url: decodedUrl
         });
 
-        if (!tracking) {
+        if (result.deletedCount === 0) {
             return res.status(404).json({
                 success: false,
                 message: "Alert not found"
             });
         }
 
-        // Soft delete - mark as inactive
-        tracking.isActive = false;
-        tracking.updatedAt = new Date();
-        await tracking.save();
-
         res.json({
             success: true,
-            message: "Alert removed successfully"
+            message: "Alert permanently deleted"
         });
     } catch (error) {
         console.error("Remove alert error:", error);
@@ -374,6 +369,9 @@ const sendEmailAlert = (email, product) => {
 };
 
 // --- Price Monitoring API ---
+// DEPRECATED: This endpoint is replaced by the cron job that properly tracks notifications
+// Keeping it commented out to avoid duplicate email alerts
+/*
 app.post('/api/price/check', async (req, res) => {
     const { url, productName, targetPrice, userEmail } = req.body;
 
@@ -398,6 +396,7 @@ app.post('/api/price/check', async (req, res) => {
         res.status(500).json({ message: "Failed to check price" });
     }
 });
+*/
 
 // --- Background Price Monitor (Cron Job) ---
 // Helper function to scrape product price from URL

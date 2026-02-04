@@ -209,6 +209,12 @@
   letter-spacing: -0.02em;
 }
 
+.price-tag.unavailable {
+  color: var(--danger);
+  font-size: 1.2rem;
+  opacity: 0.8;
+}
+
 /* Track Controls */
 .track-controls {
   display: flex;
@@ -295,6 +301,16 @@
 
 .input-group.error:focus-within {
   box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.1);
+}
+
+.input-group.disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  background: rgba(0, 0, 0, 0.2);
+}
+
+.input-group.disabled input {
+  cursor: not-allowed;
 }
 
 .currency-prefix {
@@ -614,7 +630,7 @@
 
 .remove-btn {
   position: absolute;
-  top: 12px;
+  bottom: 12px;
   right: 12px;
   background: rgba(239, 68, 68, 0.1);
   border: 1px solid rgba(239, 68, 68, 0.2);

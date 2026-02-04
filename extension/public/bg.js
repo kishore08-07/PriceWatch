@@ -1,4 +1,6 @@
-// Set up tracking alarm
+// DISABLED: Price checking is now handled by the backend cron job
+// This prevents duplicate email notifications
+/*
 chrome.runtime.onInstalled.addListener(() => {
     chrome.alarms.create('checkPrices', { periodInMinutes: 30 });
 });
@@ -9,7 +11,10 @@ chrome.alarms.onAlarm.addListener((alarm) => {
         checkAllTrackedPrices();
     }
 });
+*/
 
+// DEPRECATED: Backend cron job now handles all price monitoring
+/*
 async function checkAllTrackedPrices() {
     const result = await chrome.storage.local.get(['trackedProducts']);
     const products = result.trackedProducts || [];
@@ -40,6 +45,7 @@ async function checkAllTrackedPrices() {
         }
     }
 }
+*/
 
 function showNotification(product, latestPrice) {
     chrome.notifications.create({

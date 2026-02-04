@@ -69,6 +69,28 @@ const scrapers = {
         const nameSelectors = ['#productTitle', '#title', '.qa-title-text'];
         const priceSelectors = ['.a-price-whole', '#priceblock_ourprice', '#priceblock_dealprice', '.a-price.a-text-price.a-size-medium .a-offscreen', '.apexPriceToPay .a-offscreen'];
 
+        // Check if product is available
+        let available = true;
+        const unavailabilitySelectors = [
+            '#availability .a-color-price',
+            '#availability .a-color-state',
+            '#availability span'
+        ];
+        
+        for (const selector of unavailabilitySelectors) {
+            const element = document.querySelector(selector);
+            if (element) {
+                const text = element.innerText.toLowerCase();
+                if (text.includes('unavailable') || 
+                    text.includes('out of stock') || 
+                    text.includes('currently unavailable') ||
+                    text.includes('not available')) {
+                    available = false;
+                    break;
+                }
+            }
+        }
+
         // Try multiple image selectors for Amazon
         let image = null;
         const imageSelectors = [
@@ -92,7 +114,7 @@ const scrapers = {
 
         const name = getScopedElement(containers, nameSelectors, 'name');
         const priceText = getScopedElement(containers, priceSelectors, 'price', true);
-        return { name, price: trimPrice(priceText), platform: 'Amazon', image, currency: '₹' };
+        return { name, price: available ? trimPrice(priceText) : null, platform: 'Amazon', image, currency: '₹', available };
     },
     flipkart: () => {
         const containers = ['.WsoCM9', '.dyCpxm', '._2c2S6L', '#container'];
@@ -100,6 +122,22 @@ const scrapers = {
         const priceSelectors = ['.Nx9SaT', '._25b18c ._30jeq3', '._30jeq3._16Jk6d', '._30jeq3', 'div[class*="price"]'];
         const name = getScopedElement(containers, nameSelectors, 'name');
         const priceText = getScopedElement(containers, priceSelectors, 'price', true);
+
+        // Check if product is available
+        let available = true;
+        const bodyText = document.body.innerText.toLowerCase();
+        if (bodyText.includes('currently unavailable') || 
+            bodyText.includes('out of stock') || 
+            bodyText.includes('sold out')) {
+            const unavailabilityElements = document.querySelectorAll('div, span');
+            for (const el of unavailabilityElements) {
+                const text = el.innerText.toLowerCase();
+                if ((text.includes('unavailable') || text.includes('out of stock') || text.includes('sold out')) && text.length < 100) {
+                    available = false;
+                    break;
+                }
+            }
+        }
 
         // Try multiple image selectors for Flipkart
         let image = null;
@@ -123,7 +161,7 @@ const scrapers = {
             }
         }
 
-        return { name, price: trimPrice(priceText), platform: 'Flipkart', image, currency: '₹' };
+        return { name, price: available ? trimPrice(priceText) : null, platform: 'Flipkart', image, currency: '₹', available };
     },
     reliancedigital: () => {
         const containers = ['.product-right-container', '.product-description-container', '.pdp-main-product', 'main'];
@@ -147,6 +185,15 @@ const scrapers = {
         ];
         const name = getScopedElement(containers, nameSelectors, 'name');
         const priceText = getScopedElement(containers, priceSelectors, 'price', true);
+
+        // Check if product is available
+        let available = true;
+        const bodyText = document.body.innerText.toLowerCase();
+        if (bodyText.includes('out of stock') || 
+            bodyText.includes('currently unavailable') || 
+            bodyText.includes('not available')) {
+            available = false;
+        }
 
         // Try multiple image selectors for Reliance Digital
         let image = null;
@@ -174,7 +221,7 @@ const scrapers = {
             }
         }
 
-        return { name, price: trimPrice(priceText), platform: 'Reliance Digital', image, currency: '₹' };
+        return { name, price: available ? trimPrice(priceText) : null, platform: 'Reliance Digital', image, currency: '₹', available };
     }
 };
 

@@ -116,7 +116,7 @@ function App() {
         }
 
 
-        if (response && response.name && response.price) {
+        if (response && response.name) {
           setProduct(response);
           clearTimeout(fetchTimeout);
 
@@ -427,7 +427,11 @@ function App() {
                 <h3 className="product-name">{product.name}</h3>
                 <div className="price-container">
                   <span className="price-label">Current Price</span>
-                  <p className="price-tag">{product.currency}{product.price.toLocaleString()}</p>
+                  {product.available !== false && product.price ? (
+                    <p className="price-tag">{product.currency}{product.price.toLocaleString()}</p>
+                  ) : (
+                    <p className="price-tag unavailable">Unavailable</p>
+                  )}
                 </div>
               </div>
             </div>
@@ -450,7 +454,7 @@ function App() {
               )}
 
               {/* Helper text showing valid range */}
-              {!existingAlert && (
+              {!existingAlert && product.available !== false && product.price && (
                 <div className="input-helper">
                   <span className="helper-text">
                     Enter a price between {product.currency}1 and {product.currency}{product.price.toLocaleString()}
@@ -458,11 +462,11 @@ function App() {
                 </div>
               )}
 
-              <div className={`input-group ${validationError ? 'error' : ''} ${isInputFocused ? 'focused' : ''}`}>
+              <div className={`input-group ${validationError ? 'error' : ''} ${isInputFocused ? 'focused' : ''} ${product.available === false || !product.price ? 'disabled' : ''}`}>
                 <span className="currency-prefix">{product.currency}</span>
                 <input
                   type="number"
-                  placeholder={existingAlert ? "Enter new target price" : "Enter your target price"}
+                  placeholder={product.available === false || !product.price ? "Product unavailable" : (existingAlert ? "Enter new target price" : "Enter your target price")}
                   value={targetPrice}
                   onChange={handleTargetPriceChange}
                   onFocus={() => setIsInputFocused(true)}
@@ -470,6 +474,7 @@ function App() {
                   min="1"
                   max={product.price}
                   step="1"
+                  disabled={product.available === false || !product.price}
                 />
               </div>
 
@@ -484,7 +489,7 @@ function App() {
               <button
                 className={`btn btn-primary w-full ${isTracking ? 'btn-update' : ''}`}
                 onClick={handleTrack}
-                disabled={!targetPrice || !!validationError}
+                disabled={product.available === false || !product.price || !targetPrice || !!validationError}
               >
                 {isTracking ? (
                   <>
