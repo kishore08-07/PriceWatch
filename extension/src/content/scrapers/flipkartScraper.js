@@ -16,65 +16,95 @@ function findProductNameFallback() {
     return null;
 }
 
-// Helper: fallback to scan for price
-function findPriceFallback() {
-    // 1. Try the product detail price selector (._30jeq3 or ._16Jk6d inside #container)
-    const container = document.querySelector('#container');
-    if (container) {
-        // Try ._30jeq3._16Jk6d (current price)
-        let priceEl = container.querySelector('._30jeq3._16Jk6d');
-        if (priceEl && priceEl.innerText && priceEl.innerText.includes('₹')) {
-            const price = trimPrice(priceEl.innerText);
-            if (price && price > 10) return priceEl.innerText.trim();
-        }
-        // Try ._30jeq3 (sometimes only this class)
-        priceEl = container.querySelector('._30jeq3');
-        if (priceEl && priceEl.innerText && priceEl.innerText.includes('₹')) {
-            const price = trimPrice(priceEl.innerText);
-            if (price && price > 10) return priceEl.innerText.trim();
-        }
-    }
-
-    // 2. Try the exact class pattern from listing: div[class*='1psv1ze']
-    const priceDiv = document.querySelector("div[class*='1psv1ze']");
-    if (priceDiv && priceDiv.innerText && priceDiv.innerText.includes('₹')) {
-        const price = trimPrice(priceDiv.innerText);
-        if (price && price > 10) return priceDiv.innerText.trim();
-    }
-
-    // 3. Try visible price elements with ₹ and not strikethrough/discount
-    const priceCandidates = [];
-    const elements = Array.from(document.querySelectorAll('*'));
-    for (const el of elements) {
-        if (el.children.length === 0 && el.offsetParent !== null) { // visible only
+/**
+ * Extracts Flipkart price from VISIBLE DOM only (never meta/schema/hidden nodes)
+ * Resilient to DOM/class changes with multi-level fallback strategy
+ */
+function getFlipkartPrice() {
+    // Strategy 1: Try known visible price classes
+    const knownSelectors = [
+        '._30jeq3._16Jk6d',  // Common product page price
+        '._30jeq3',           // Alternative class
+    ];
+    
+    for (const selector of knownSelectors) {
+        const el = document.querySelector(selector);
+        if (el && el.offsetParent !== null) { // Must be visible
             const text = el.innerText && el.innerText.trim();
-            if (text && text.includes('₹') && text.length < 20) {
-                // Exclude strikethrough (original price) and discount/offer
-                const style = window.getComputedStyle(el);
-                if (style.textDecoration.includes('line-through')) continue;
-                if (/off|save|discount|%|\bMRP\b|\bList\b|\bDeal\b/i.test(text)) continue;
+            if (text && text.includes('₹')) {
                 const price = trimPrice(text);
-                if (price && price > 10) priceCandidates.push({price, text, el});
+                // Reject values with < 4 digits (like 183)
+                if (price && price >= 1000) {
+                    return text;
+                }
             }
         }
     }
-    // Pick the lowest visible price (usually the current price)
-    if (priceCandidates.length > 0) {
-        priceCandidates.sort((a, b) => a.price - b.price);
-        return priceCandidates[0].text;
-    }
-    // 4. Try meta og:price:amount
-    const meta = document.querySelector('meta[property="product:price:amount"]');
-    if (meta && meta.content) return meta.content;
-    // 5. Try aria-labels
-    for (const el of elements) {
-        const label = el.getAttribute && el.getAttribute('aria-label');
-        if (label && label.includes('₹')) {
-            const price = trimPrice(label);
-            if (price && price > 10) return label;
+    
+    // Strategy 2: Try observed React container pattern
+    const reactContainer = document.querySelector("div.vzwn2j[class*='1psv1ze']");
+    if (reactContainer && reactContainer.offsetParent !== null) {
+        const text = reactContainer.innerText && reactContainer.innerText.trim();
+        if (text && text.includes('₹')) {
+            const price = trimPrice(text);
+            if (price && price >= 1000) {
+                return text;
+            }
         }
     }
-    return null;
+    
+    // Strategy 3: Scan all visible <div> and <span> elements
+    const priceCandidates = [];
+    const elements = document.querySelectorAll('div, span');
+    
+    for (const el of elements) {
+        // Skip if element has children (we want leaf text nodes)
+        if (el.children.length > 0) continue;
+        
+        // Must be visible to user
+        if (el.offsetParent === null) continue;
+        
+        // Skip hidden containers (meta, script, style, etc.)
+        const tagName = el.tagName.toLowerCase();
+        if (['meta', 'script', 'style', 'link', 'noscript'].includes(tagName)) continue;
+        
+        const text = el.innerText && el.innerText.trim();
+        if (!text || !text.includes('₹')) continue;
+        
+        // Text should be reasonably short (not a paragraph)
+        if (text.length > 30) continue;
+        
+        // Exclude strikethrough (original/MRP price)
+        const style = window.getComputedStyle(el);
+        if (style.textDecoration.includes('line-through')) continue;
+        
+        // Exclude discount/offer text
+        if (/off|save|discount|%|\bMRP\b|\blist price\b|\bdeal\b/i.test(text)) continue;
+        
+        const price = trimPrice(text);
+        
+        // Guard: reject values with < 4 digits
+        if (!price || price < 1000) continue;
+        
+        // Get font size for comparison (real price is usually largest)
+        const fontSize = parseFloat(style.fontSize);
+        
+        priceCandidates.push({
+            price,
+            text,
+            fontSize: isNaN(fontSize) ? 0 : fontSize,
+            el
+        });
+    }
+    
+    if (priceCandidates.length === 0) {
+        return null; // No valid price found
+    }
+    
+    // Pick the element with largest font-size (current price is visually prominent)
+    priceCandidates.sort((a, b) => b.fontSize - a.fontSize);
+    
+    return priceCandidates[0].text;
 }
 
 export const scrapeFlipkart = () => {
@@ -84,18 +114,36 @@ export const scrapeFlipkart = () => {
     let name = getScopedElement(containers, nameSelectors, 'name');
     if (!name) name = findProductNameFallback();
 
-    let priceText = getScopedElement(containers, priceSelectors, 'price', true);
-    if (!priceText || trimPrice(priceText) < 10) priceText = findPriceFallback();
+    // Use Flipkart-specific visible DOM extraction
+    let priceText = getFlipkartPrice();
 
-    // Check availability
+    // Check availability - if we found a valid price, product is available
+    // Price presence indicates the selected variant is in stock
     let available = true;
-    const bodyText = document.body.innerText.toLowerCase();
-    for (const keyword of unavailabilityKeywords) {
-        if (bodyText.includes(keyword)) {
-            const unavailabilityElements = document.querySelectorAll('div, span');
-            for (const el of unavailabilityElements) {
-                const text = el.innerText.toLowerCase();
-                if (text.includes(keyword) && text.length < 100) {
+    
+    if (!priceText || trimPrice(priceText) === null) {
+        // Only check unavailability if no price was found
+        // Look for prominent unavailability messages (large text, near top of page)
+        const unavailabilityElements = document.querySelectorAll('div, span, p');
+        for (const el of unavailabilityElements) {
+            // Only check visible, prominent elements (large font, high up on page)
+            if (el.offsetParent === null) continue;
+            
+            const text = el.innerText && el.innerText.toLowerCase().trim();
+            if (!text || text.length > 150) continue; // Skip long paragraphs
+            
+            // Check if it's a prominent message (font size > 14px)
+            const style = window.getComputedStyle(el);
+            const fontSize = parseFloat(style.fontSize);
+            if (fontSize < 14) continue;
+            
+            // Check for unavailability keywords in prominent locations
+            for (const keyword of unavailabilityKeywords) {
+                if (text.includes(keyword)) {
+                    // Make sure it's not inside variant selector or review text
+                    const upperText = el.innerText.toUpperCase();
+                    if (upperText.includes('VARIANT') || upperText.includes('REVIEW')) continue;
+                    
                     available = false;
                     break;
                 }

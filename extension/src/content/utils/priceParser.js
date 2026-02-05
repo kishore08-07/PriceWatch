@@ -9,14 +9,14 @@ export const trimPrice = (str) => {
 export const findPriceByHeuristic = (container = document) => {
     const elements = Array.from(container.querySelectorAll('*'));
     for (const el of elements) {
-        if (el.children.length === 0) {
+        if (el.children.length === 0 && el.innerText) {
             const text = el.innerText.trim();
             if (text.startsWith('₹') && text.length > 1 && text.length < 20) {
                 const price = trimPrice(text);
                 if (price && price > 100) return text;
             }
         }
-        const label = el.getAttribute('aria-label');
+        const label = el.getAttribute && el.getAttribute('aria-label');
         if (label && label.startsWith('₹') && label.length < 20) {
             const price = trimPrice(label);
             if (price && price > 100) return label;
@@ -32,9 +32,9 @@ export const getScopedElement = (containerSelectors, elementSelectors, fieldName
             for (const eSelector of elementSelectors) {
                 const el = container.querySelector(eSelector);
                 if (el) {
-                    const text = el.innerText.trim();
+                    const text = el.innerText && el.innerText.trim();
                     if (text) return text;
-                    const label = el.getAttribute('aria-label');
+                    const label = el.getAttribute && el.getAttribute('aria-label');
                     if (label && label.includes('₹')) return label;
                 }
             }
@@ -47,9 +47,9 @@ export const getScopedElement = (containerSelectors, elementSelectors, fieldName
     for (const eSelector of elementSelectors) {
         const el = document.querySelector(eSelector);
         if (el) {
-            const text = el.innerText.trim();
+            const text = el.innerText && el.innerText.trim();
             if (text) return text;
-            const label = el.getAttribute('aria-label');
+            const label = el.getAttribute && el.getAttribute('aria-label');
             if (label && label.includes('₹')) return label;
         }
     }

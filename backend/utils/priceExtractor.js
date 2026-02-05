@@ -9,39 +9,29 @@ const extractPriceFromHtml = (html) => {
         .replace(/-[0-9]+%/g, ''); // Remove "-70%" type discount percentages
     
     // Multiple extraction strategies for different platforms
+    // CRITICAL: Order matters - most reliable patterns FIRST
     const pricePatterns = [
-        // Amazon patterns (enhanced)
+        // Amazon - Most reliable patterns first (visible DOM prices)
+        /"apexPriceToPay"[\s]*:.*?"displayPrice"[\s]*:[\s]*"₹([0-9,]+)"/g,  // Primary Amazon price
+        /class="a-price-whole"[^>]*>([0-9,]+)<\/span>/g,  // Visible price element
+        /id="priceblock_ourprice"[^>]*>₹[\s]*([0-9,]+)/g,
+        /id="priceblock_dealprice"[^>]*>₹[\s]*([0-9,]+)/g,
+        /"priceToPay"[\s]*:[\s]*([0-9,]+(?:\.[0-9]{2})?)/g,
         /"priceAmount"[\s]*:[\s]*([0-9,]+(?:\.[0-9]{2})?)/g,
-        /"price"[\s]*:[\s]*"?([0-9,]+(?:\.[0-9]{2})?)"?/g,
-        /priceToPay[\s]*:[\s]*([0-9,]+(?:\.[0-9]{2})?)/g,
-        /"apexPriceToPay"[\s]*:.*?"displayPrice"[\s]*:[\s]*"₹([0-9,]+)"/g,
-        /"buyingPrice"[\s]*:[\s]*([0-9,]+(?:\.[0-9]{2})?)/g,
-        /"listPrice"[\s]*:[\s]*([0-9,]+(?:\.[0-9]{2})?)/g,
-        /data-a-color="price"[^>]*>₹([0-9,]+)/g,
-        /class="a-price-whole"[^>]*>([0-9,]+)/g,
-        /id="priceblock_ourprice"[^>]*>₹([0-9,]+)/g,
-        /id="priceblock_dealprice"[^>]*>₹([0-9,]+)/g,
         
-        // Flipkart patterns
-        /"price_range"[\s]*:.*?"min_price"[\s]*:[\s]*([0-9,]+)/g,
-        /"offerPrice"[\s]*:[\s]*([0-9,]+(?:\.[0-9]{2})?)/g,
+        // Flipkart - Visible DOM patterns only
         /"sellingPrice"[\s]*:[\s]*([0-9,]+(?:\.[0-9]{2})?)/g,
-        
-        // Reliance Digital patterns (most specific first)
         /"offerPrice"[\s]*:[\s]*([0-9,]+(?:\.[0-9]{2})?)/g,
+        
+        // Reliance Digital patterns
         /"dealPrice"[\s]*:[\s]*([0-9,]+(?:\.[0-9]{2})?)/g,
         
-        // Generic patterns (prices with rupee symbol)
-        /₹[\s]*([0-9,]+(?:\.[0-9]{2})?)/g,
+        // Structured data - JSON-LD (more reliable than meta)
+        /"@type"[\s]*:[\s]*"Product".*?"offers"[\s]*:.*?"price"[\s]*:[\s]*"?([0-9,]+(?:\.[0-9]{2})?)"?/gs,
         
-        // Generic patterns
-        /"amount"[\s]*:[\s]*([0-9,]+(?:\.[0-9]{2})?)/g,
-        /₹<\/span>[\s]*<span[^>]*>([0-9,]+)/g,
-        /<span[^>]*class="[^"]*price[^"]*"[^>]*>₹?[\s]*([0-9,]+)/gi,
-        
-        // Structured data (JSON-LD)
-        /"@type"[\s]*:[\s]*"Product".*?"price"[\s]*:[\s]*"?([0-9,]+(?:\.[0-9]{2})?)"?/gs,
-        /"offers"[\s]*:.*?"price"[\s]*:[\s]*"?([0-9,]+(?:\.[0-9]{2})?)"?/gs
+        // Generic fallbacks (use with caution)
+        /data-a-color="price"[^>]*>₹([0-9,]+)/g,
+        /<span[^>]*class="[^"]*a-price-whole[^"]*"[^>]*>([0-9,]+)/gi
     ];
 
     const foundPrices = [];
@@ -66,22 +56,27 @@ const extractPriceFromHtml = (html) => {
         return null;
     }
 
-    // Remove duplicates and sort
-    const uniquePrices = [...new Set(foundPrices)].sort((a, b) => a - b);
+    // Remove duplicates
+    const uniquePrices = [...new Set(foundPrices)];
     
-    // Filter out outliers (MRP is usually much higher)
-    // If we have multiple prices, take the lowest reasonable one
-    if (uniquePrices.length > 1) {
-        // Remove prices that are more than 2x the lowest price (likely MRP)
-        const lowestPrice = uniquePrices[0];
-        const reasonablePrices = uniquePrices.filter(p => p <= lowestPrice * 2);
-        
-        if (reasonablePrices.length > 0) {
-            return Math.floor(reasonablePrices[0]);
-        }
-    }
+    // CRITICAL FIX: Don't blindly pick lowest price
+    // Instead, use frequency-based selection - the price that appears most often
+    // is likely the real current price (appears in multiple DOM locations)
+    const priceFrequency = {};
+    foundPrices.forEach(price => {
+        priceFrequency[price] = (priceFrequency[price] || 0) + 1;
+    });
     
-    return Math.floor(uniquePrices[0]);
+    // Sort by frequency (most common first), then by value (higher first for same frequency)
+    const sortedByFrequency = uniquePrices.sort((a, b) => {
+        const freqDiff = priceFrequency[b] - priceFrequency[a];
+        if (freqDiff !== 0) return freqDiff;
+        // If same frequency, prefer higher price (current price usually > offers/cashback)
+        return b - a;
+    });
+    
+    // Return the most frequently occurring price
+    return Math.floor(sortedByFrequency[0]);
 };
 
 module.exports = { extractPriceFromHtml };

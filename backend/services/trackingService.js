@@ -141,6 +141,12 @@ const checkPriceForTracking = async (tracking) => {
         // Successfully scraped - reset failure count
         tracking.failureCount = 0;
         tracking.lastError = null;
+        
+        // Store previous price before updating to new price
+        if (tracking.currentPrice !== null && tracking.currentPrice !== currentPrice) {
+            tracking.previousPrice = tracking.currentPrice;
+        }
+        
         tracking.currentPrice = currentPrice;
         tracking.lastChecked = new Date();
         tracking.updatedAt = new Date();

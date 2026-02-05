@@ -53,6 +53,19 @@ function App() {
     };
 
     initializeApp();
+    
+    // Listen for storage changes to refresh watchlist when prices are updated
+    const handleStorageChange = (changes, areaName) => {
+      if (areaName === 'local' && changes.trackedProducts) {
+        fetchTrackedProducts();
+      }
+    };
+    
+    chrome.storage.onChanged.addListener(handleStorageChange);
+    
+    return () => {
+      chrome.storage.onChanged.removeListener(handleStorageChange);
+    };
   }, []);
 
   // Update target price when existing alert changes

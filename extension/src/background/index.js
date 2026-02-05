@@ -33,8 +33,28 @@ async function handleProductDetected(productData, tabId) {
     activeProductUrl = productData.url;
     activeProductTabId = tabId;
     
+    // Update current price in watchlist if this product is being tracked
+    await updateTrackedProductPrice(productData);
+    
     // If user is on a product page, set up active tab monitoring
     await scheduleActiveTabCheck(productData);
+}
+
+// Update the current price of a tracked product
+async function updateTrackedProductPrice(productData) {
+    const result = await chrome.storage.local.get(['trackedProducts']);
+    const tracked = result.trackedProducts || [];
+    
+    const existingIndex = tracked.findIndex(p => p.url === productData.url);
+    
+    if (existingIndex !== -1) {
+        // Product is being tracked - update its current price
+        tracked[existingIndex].currentPrice = productData.price;
+        tracked[existingIndex].lastChecked = new Date().toISOString();
+        
+        await chrome.storage.local.set({ trackedProducts: tracked });
+        console.log(`[PriceWatch] Updated price for ${productData.name}: ₹${productData.price}`);
+    }
 }
 
 // Schedule price check for active tab (45 seconds)

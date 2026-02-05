@@ -8,6 +8,7 @@ const sendPushNotification = async (tracking, currentPrice) => {
         await sendEmailAlert(tracking.userEmail, {
             productName: tracking.productName,
             currentPrice: currentPrice || tracking.currentPrice,
+            previousPrice: tracking.previousPrice,  // Pass previous observed price
             targetPrice: tracking.targetPrice,
             url: tracking.url,
             image: tracking.image,

@@ -4,6 +4,7 @@ const trackingSchema = new mongoose.Schema({
     userEmail: { type: String, required: true, index: true },
     productName: String,
     currentPrice: Number,
+    previousPrice: Number,  // Last observed price before current update
     targetPrice: { type: Number, required: true },
     url: { type: String, required: true },
     platform: String,
