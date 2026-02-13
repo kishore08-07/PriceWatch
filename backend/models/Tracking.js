@@ -4,7 +4,7 @@ const trackingSchema = new mongoose.Schema({
     userEmail: { type: String, required: true, index: true },
     productName: String,
     currentPrice: Number,
-    previousPrice: Number,  // Last observed price before current update
+    previousPrice: Number, 
     targetPrice: { type: Number, required: true },
     url: { type: String, required: true },
     platform: String,
@@ -14,7 +14,7 @@ const trackingSchema = new mongoose.Schema({
     lastChecked: Date,
     notified: { type: Boolean, default: false },
     notifiedAt: Date,
-    lastNotifiedPrice: Number,  // Track price at which notification was sent
+    lastNotifiedPrice: Number,  
     repeatAlerts: { type: Boolean, default: false },
     failureCount: { type: Number, default: 0 },
     lastError: String,

@@ -28,7 +28,7 @@ const trackingSchema = new mongoose.Schema({
     updatedAt: { type: Date, default: Date.now }
 });
 
-// Create a compound unique index to prevent duplicate alerts for same user+product
+
 trackingSchema.index({ userEmail: 1, url: 1 }, { unique: true });
 
 const User = mongoose.model('User', userSchema);

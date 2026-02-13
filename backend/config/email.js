@@ -12,7 +12,9 @@ if (!process.env.EMAIL_USER || !process.env.EMAIL_PASS) {
 }
 
 const transporter = nodemailer.createTransport({
-    service: 'gmail',
+    host: 'smtp.gmail.com',
+    port: 587,
+    secure: false, // Use TLS
     auth: {
         user: process.env.EMAIL_USER || '',
         pass: process.env.EMAIL_PASS || ''
@@ -23,8 +25,9 @@ const transporter = nodemailer.createTransport({
 if (process.env.EMAIL_USER && process.env.EMAIL_PASS) {
     transporter.verify((error, success) => {
         if (error) {
-            console.error('❌ Email transporter verification failed:', error.message);
-            console.error('   Check your EMAIL_USER and EMAIL_PASS in .env');
+            console.error('⚠️  Email transporter verification failed:', error.message);
+            console.error('   Email notifications will be disabled');
+            console.error('   Possible causes: Network firewall blocking SMTP ports 465/587');
         } else {
             console.log('✅ Email transporter ready');
         }
