@@ -5,15 +5,29 @@
     "version": "1.0.0",
     "permissions": [
         "activeTab",
+        "tabs",
+        "scripting",
         "storage",
         "alarms",
         "notifications",
-        "identity"
+        "identity",
+        "webRequest"
     ],
     "host_permissions": [
+        "https://*.amazon.com/*",
+        "https://amazon.com/*",
         "https://*.amazon.in/*",
+        "https://amazon.in/*",
+        "https://*.amazon.co.uk/*",
+        "https://amazon.co.uk/*",
+        "https://*.amazon.de/*",
+        "https://amazon.de/*",
+        "https://*.amazon.ca/*",
+        "https://amazon.ca/*",
         "https://*.flipkart.com/*",
+        "https://flipkart.com/*",
         "https://*.reliancedigital.in/*",
+        "https://reliancedigital.in/*",
         "http://localhost:8000/*"
     ],
     "oauth2": {
@@ -24,7 +38,8 @@
         ]
     },
     "action": {
-        "default_popup": "popup.html"
+        "default_popup": "popup.html",
+        "default_title": "PriceWatch - AI Review Analysis"
     },
     "background": {
         "service_worker": "bg.js"
@@ -32,14 +47,22 @@
     "content_scripts": [
         {
             "matches": [
-                "https://*.amazon.in/*",
-                "https://*.flipkart.com/*",
-                "https://*.reliancedigital.in/*"
+                "https://www.amazon.com/*",
+                "https://amazon.com/*",
+                "https://www.amazon.in/*",
+                "https://amazon.in/*",
+                "https://www.amazon.co.uk/*",
+                "https://amazon.co.uk/*",
+                "https://www.flipkart.com/*",
+                "https://flipkart.com/*",
+                "https://www.reliancedigital.in/*",
+                "https://reliancedigital.in/*"
             ],
             "js": [
                 "content.js"
             ],
-            "run_at": "document_idle"
+            "run_at": "document_idle",
+            "all_frames": false
         }
     ]
 }

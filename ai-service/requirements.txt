@@ -1,0 +1,15 @@
+# PriceWatch AI Service — Python Dependencies
+# Install with: pip install -r requirements.txt
+
+# Web framework
+fastapi==0.115.6
+uvicorn[standard]==0.32.1
+
+# ML / NLP
+transformers==4.47.1
+torch==2.5.1           # CPU-only; use torch==2.5.1+cu121 for CUDA
+sentencepiece==0.2.0   # Required by some tokenizers
+protobuf==5.29.2       # Required by sentencepiece
+
+# Validation
+pydantic==2.10.3

@@ -12,5 +12,10 @@ export const API_ENDPOINTS = {
         REMOVE: (email, url) => `${API_BASE_URL}/api/tracker/remove/${email}/${encodeURIComponent(url)}`,
         CHECK_NOW: (id) => `${API_BASE_URL}/api/tracker/check-now/${id}`,
         TEST_EMAIL: (id) => `${API_BASE_URL}/api/tracker/test-email/${id}`
+    },
+    REVIEWS: {
+        ANALYZE_DIRECT: `${API_BASE_URL}/api/reviews/analyze-direct`,
+        INVALIDATE_CACHE: `${API_BASE_URL}/api/reviews/invalidate-cache`,
+        HEALTH: `${API_BASE_URL}/api/reviews/health`
     }
 };

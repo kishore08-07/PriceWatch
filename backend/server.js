@@ -12,7 +12,10 @@ const app = express();
 
 // Middleware
 app.use(cors());
-app.use(express.json());
+// Increase body size limit to 50 MB — review payloads with 500–1000 reviews
+// easily exceed the default 100 KB limit, causing silent 413 errors.
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
 // Connect to MongoDB
 connectDatabase();

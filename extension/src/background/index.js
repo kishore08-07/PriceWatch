@@ -1,5 +1,8 @@
 import { showNotification } from './notificationService.js';
 
+// Base URL for the Node backend API
+const NODE_API_BASE = 'http://localhost:8000';
+
 // Alarm intervals (in minutes)
 const INTERVALS = {
     ACTIVE_TAB: 45 / 60,           // 45 seconds
@@ -15,18 +18,274 @@ const ALARM_NAMES = {
     BACKGROUND_CHECK: 'background-check'
 };
 
+// Supported platforms for auto-popup
+const SUPPORTED_PLATFORMS = [
+    'amazon.',
+    'flipkart.com',
+    'reliancedigital.in'
+];
+
 // Store active tab tracking state
 let activeProductUrl = null;
 let activeProductTabId = null;
+let popupOpenedTabs = new Set(); // Track tabs where popup has been opened
+
+// Check if URL is a supported platform product page
+function isSupportedProductPage(url) {
+    if (!url) return false;
+    const urlLower = url.toLowerCase();
+    
+    // Amazon product pages
+    if (urlLower.includes('amazon.') && urlLower.includes('/dp/')) {
+        return true;
+    }
+    
+    // Flipkart product pages
+    if (urlLower.includes('flipkart.com') && urlLower.includes('/p/itm')) {
+        return true;
+    }
+    
+    // Reliance Digital product pages
+    if (urlLower.includes('reliancedigital.in') && urlLower.includes('/p/')) {
+        return true;
+    }
+    
+    return false;
+}
+
+// Auto-open popup on product pages
+async function autoOpenPopup(tabId, url) {
+    // Only open popup once per tab
+    if (popupOpenedTabs.has(tabId)) {
+        return;
+    }
+    
+    if (!isSupportedProductPage(url)) {
+        return;
+    }
+    
+    try {
+        // Open popup by calling popup.html
+        popupOpenedTabs.add(tabId);
+        
+        console.log(`[PriceWatch] Auto-opening popup on tab ${tabId} for ${url}`);
+        
+        // The popup will open automatically when the user clicks the extension icon
+        // We mark the tab so we can restore state if needed
+        await chrome.tabs.sendMessage(tabId, {
+            action: 'PRODUCT_PAGE_DETECTED',
+            url
+        }).catch(err => {
+            // Content script might not be loaded yet
+            console.log('[PriceWatch] Content script not ready, will retry');
+        });
+    } catch (error) {
+        console.error('[PriceWatch] Error auto-opening popup:', error);
+    }
+}
 
 // Listen for messages from content script or popup
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     if (request.action === 'PRODUCT_DETECTED') {
-        console.log("[PriceWatch] Product detected:", request.data);
+        console.log('[PriceWatch] Product detected:', request.data);
         handleProductDetected(request.data, sender.tab?.id);
+
+        // Auto-open popup on supported platforms
+        if (isSupportedProductPage(sender.tab?.url)) {
+            autoOpenPopup(sender.tab?.id, sender.tab?.url);
+        }
+        return true;
     }
+
+    if (request.action === 'AI_INSIGHTS_REQUEST') {
+        handleAiInsightsRequest(request, sendResponse);
+        return true; // keep message channel open for async response
+    }
+
+    // ── Fetch proxy for content script pagination ─────────────────────────
+    // ROOT CAUSE FIX: Fetching from the service worker OR content script sends
+    // Origin: chrome-extension://... — Amazon bot detection sees this as
+    // non-browser and returns CAPTCHA/empty page.
+    // Solution: chrome.scripting.executeScript with world:'MAIN' runs the
+    // fetch inside the actual Amazon page's JS context, so Origin/Referer
+    // look exactly like a same-origin request. No bot detection triggered.
+    if (request.action === 'FETCH_PAGE') {
+        const url = request.url;
+        const tabId = sender.tab?.id;
+
+        if (!url || typeof url !== 'string') {
+            sendResponse({ error: 'Missing or invalid URL' });
+            return true;
+        }
+
+        if (tabId) {
+            // ── Strategy A: execute fetch in the page's MAIN world ────────
+            // This is the key: fetch() runs as amazon.in's own JS, not extension
+            chrome.scripting.executeScript({
+                target: { tabId },
+                world: 'MAIN',
+                func: async (fetchUrl) => {
+                    try {
+                        const resp = await fetch(fetchUrl, {
+                            credentials: 'include',
+                            headers: {
+                                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                            },
+                            redirect: 'follow',
+                        });
+                        if (!resp.ok) return { error: `HTTP ${resp.status}` };
+                        return { html: await resp.text() };
+                    } catch (e) {
+                        return { error: e.message };
+                    }
+                },
+                args: [url],
+            })
+            .then(([result]) => {
+                sendResponse(result?.result || { error: 'No result from script' });
+            })
+            .catch((err) => {
+                // ── Strategy B: service-worker fetch fallback ─────────────
+                console.warn('[PriceWatch] MAIN-world fetch failed, using sw fetch:', err.message);
+                fetch(url, {
+                    credentials: 'include',
+                    headers: { 'Accept': 'text/html,application/xhtml+xml' },
+                    redirect: 'follow',
+                })
+                .then((r) => r.ok ? r.text() : Promise.reject(new Error(`HTTP ${r.status}`)))
+                .then((html) => sendResponse({ html }))
+                .catch((e2) => sendResponse({ error: e2.message }));
+            });
+        } else {
+            // No tabId — service-worker fetch only
+            fetch(url, {
+                credentials: 'include',
+                headers: { 'Accept': 'text/html,application/xhtml+xml' },
+                redirect: 'follow',
+            })
+            .then((r) => r.ok ? r.text() : Promise.reject(new Error(`HTTP ${r.status}`)))
+            .then((html) => sendResponse({ html }))
+            .catch((err) => {
+                console.warn('[PriceWatch] FETCH_PAGE error:', err.message);
+                sendResponse({ error: err.message });
+            });
+        }
+        return true; // async sendResponse
+    }
+
     return true;
 });
+
+/**
+ * Handle AI review analysis requests from the popup.
+ *
+ * Pipeline:
+ *   1. Find the active product tab
+ *   2. Ask the content script to extract reviews from the DOM
+ *   3. POST the extracted reviews to the Node API orchestrator
+ *   4. Return the structured ML result to the popup via sendResponse
+ *
+ * @param {Object} request       - { productUrl, skipCache }
+ * @param {Function} sendResponse - Chrome messaging callback
+ */
+async function handleAiInsightsRequest(request, sendResponse) {
+    const { productUrl, skipCache = false } = request;
+    console.log('[PriceWatch] 🤖 AI_INSIGHTS_REQUEST for:', productUrl);
+
+    try {
+        // ── Step 1: Locate the tab that has this product URL open ──────────
+        // Query all tabs (requires 'tabs' permission in manifest).
+        // Prefer the active tab in the current window; fall back to any tab
+        // whose URL matches the requested product URL.
+        const [activeTabs, allTabs] = await Promise.all([
+            chrome.tabs.query({ active: true, currentWindow: true }),
+            chrome.tabs.query({}),
+        ]);
+
+        let targetTab = activeTabs[0] || null;
+
+        // If the active tab URL doesn't match, find the product tab by URL string
+        if (!targetTab || (productUrl && targetTab.url !== productUrl)) {
+            const match = allTabs.find((t) => t.url === productUrl);
+            if (match) targetTab = match;
+        }
+
+        if (!targetTab) {
+            console.warn('[PriceWatch] No matching tab found for:', productUrl);
+            sendResponse({
+                success: false,
+                error: 'Product tab not found. Please navigate to the product page and try again.',
+            });
+            return;
+        }
+
+        const tabId = targetTab.id;
+        const effectiveUrl = productUrl || targetTab.url;
+
+        // ── Step 2: Extract reviews from the content script ────────────────
+        console.log('[PriceWatch] Requesting reviews from tab:', tabId);
+        let reviews = [];
+        let contentPlatform = 'unknown';
+        let contentTotalPages = 0;        let totalScraped = 0;
+        try {
+            const contentResponse = await chrome.tabs.sendMessage(tabId, { action: 'GET_REVIEWS' });
+
+            if (contentResponse && Array.isArray(contentResponse.reviews)) {
+                reviews = contentResponse.reviews;
+                contentPlatform = contentResponse.platform || 'unknown';
+                contentTotalPages = contentResponse.totalPages || 1;
+                totalScraped = contentResponse.totalRaw || reviews.length;
+                console.log(`[PriceWatch] Content script returned ${reviews.length} reviews from ${contentPlatform} (${contentTotalPages} pages, ${totalScraped} raw)`);
+            } else if (contentResponse && contentResponse.error) {
+                console.warn('[PriceWatch] Content script error:', contentResponse.error);
+            }
+        } catch (contentErr) {
+            console.warn('[PriceWatch] Could not reach content script:', contentErr.message);
+        }
+
+        if (!reviews || reviews.length === 0) {
+            sendResponse({
+                success: false,
+                error: 'No reviews found on this page. The product may not have any reviews yet, or the page hasn\'t fully loaded. Please scroll to the reviews section and try again.',
+            });
+            return;
+        }
+
+        // ── Step 3: Send to Node API orchestrator → Python ML ──────────────
+        console.log(`[PriceWatch] Sending ${reviews.length} reviews to Node API for ML analysis…`);
+
+        const apiResponse = await fetch(`${NODE_API_BASE}/api/reviews/analyze-direct`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                url: effectiveUrl,
+                reviews,
+                skipCache,
+                platform: contentPlatform,
+                totalPages: contentTotalPages,
+                totalScraped: totalScraped || reviews.length,
+            }),
+        });
+
+        if (!apiResponse.ok) {
+            const errBody = await apiResponse.json().catch(() => ({}));
+            throw new Error(errBody.error || errBody.message || `API error ${apiResponse.status}`);
+        }
+
+        const result = await apiResponse.json();
+
+        if (!result.success && result.error) {
+            throw new Error(result.error);
+        }
+
+        console.log('[PriceWatch] ✅ Analysis complete — score:', result.sentimentScore, '| cached:', result.fromCache);
+        sendResponse(result);
+
+    } catch (err) {
+        console.error('[PriceWatch] ❌ AI_INSIGHTS_REQUEST failed:', err.message);
+        sendResponse({ success: false, error: err.message || 'Analysis failed. Please try again.' });
+    }
+}
 
 // Handle product detection on a tab
 async function handleProductDetected(productData, tabId) {
@@ -218,6 +477,9 @@ chrome.tabs.onRemoved.addListener((tabId) => {
         activeProductUrl = null;
         activeProductTabId = null;
     }
+    
+    // Also clear from popup tracking
+    popupOpenedTabs.delete(tabId);
 });
 
 // Initialize on extension startup

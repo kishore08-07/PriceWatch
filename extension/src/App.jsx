@@ -68,6 +68,21 @@ function App() {
     };
   }, []);
 
+  // Prevent popup from closing on tab switch
+  useEffect(() => {
+    const handleVisibilityChange = () => {
+      // Keep popup state alive
+      document.addEventListener('visibilitychange', () => {
+        if (!document.hidden) {
+          // Refresh product data when popup becomes visible again
+          fetchProduct();
+        }
+      });
+    };
+
+    handleVisibilityChange();
+  }, [fetchProduct]);
+
   // Update target price when existing alert changes
   useEffect(() => {
     if (existingAlert) {
@@ -151,7 +166,7 @@ function App() {
           <LoadingState />
         )}
 
-        <FeatureGrid />
+        <FeatureGrid product={product} />
         <Watchlist
           trackedProducts={trackedProducts}
           onRemoveItem={handleRemove}
