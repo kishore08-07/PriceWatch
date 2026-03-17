@@ -5,7 +5,8 @@ const {
     deactivateTracking,
     deleteTrackingByUrl,
     triggerManualPriceCheck,
-    testEmailNotification
+    testEmailNotification,
+    testWhatsAppNotification
 } = require('../services/trackingService');
 const { validateTrackingInput } = require('../validators/trackingValidator');
 const { successResponse, errorResponse } = require('../utils/responseHelper');
@@ -112,6 +113,25 @@ const testEmail = async (req, res) => {
     }
 };
 
+const testWhatsApp = async (req, res) => {
+    try {
+        const result = await testWhatsAppNotification(req.params.id);
+        if (result.whatsappResult?.success) {
+            return successResponse(res, result, 'Test WhatsApp alert sent successfully');
+        }
+        const reason = result.whatsappResult?.reason || 'Unknown reason';
+        const skipped = result.whatsappResult?.skipped;
+        const msg = skipped
+            ? `WhatsApp skipped: ${reason}`
+            : `WhatsApp failed: ${reason}`;
+        return errorResponse(res, msg, 400, { result });
+    } catch (error) {
+        console.error('Test WhatsApp error:', error);
+        const statusCode = error.message === 'Alert not found' ? 404 : 500;
+        return errorResponse(res, error.message || 'Error sending test WhatsApp', statusCode, { error: error.message });
+    }
+};
+
 module.exports = {
     addTracking,
     checkTracking,
@@ -119,5 +139,6 @@ module.exports = {
     deleteTracking,
     removeTracking,
     checkNow,
-    testEmail
+    testEmail,
+    testWhatsApp
 };

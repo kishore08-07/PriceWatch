@@ -1,9 +1,10 @@
-import React, { useEffect } from 'react';
+import React, { useEffect, useState } from 'react';
 import './App.css';
 import { useAuth } from './popup/hooks/useAuth';
 import { useProduct } from './popup/hooks/useProduct';
 import { useValidation } from './popup/hooks/useValidation';
 import { useTracking } from './popup/hooks/useTracking';
+import { useWhatsApp } from './popup/hooks/useWhatsApp';
 import { storageService } from './shared/services/storageService';
 import Header from './popup/components/Header';
 import ProductCard from './popup/components/ProductCard';
@@ -13,6 +14,7 @@ import Watchlist from './popup/components/Watchlist';
 import LoadingState from './popup/components/LoadingState';
 import ErrorState from './popup/components/ErrorState';
 import Footer from './popup/components/Footer';
+import WhatsAppSettings from './popup/components/WhatsAppSettings';
 
 function App() {
   const { user, setUser, login } = useAuth();
@@ -41,6 +43,32 @@ function App() {
     submitTracking,
     handleRemoveTracking
   } = useTracking();
+
+  const [showWhatsAppSettings, setShowWhatsAppSettings] = useState(false);
+
+  const {
+    phoneNumber,
+    setPhoneNumber,
+    otp,
+    setOtp,
+    step: whatsappStep,
+    loading: whatsappLoading,
+    error: whatsappError,
+    successMessage: whatsappSuccess,
+    whatsappStatus,
+    serviceStatus,
+    qrCodeDataUrl,
+    handleStartPairing,
+    handleRefreshPairing,
+    handleSendOtp,
+    handleVerifyOtp,
+    handleToggle,
+    handleReset,
+    startVerification,
+    fetchStatus: fetchWhatsAppStatus
+  } = useWhatsApp(user?.email);
+
+  const isWhatsAppVerified = whatsappStep === 'verified' || !!whatsappStatus?.verified;
 
   useEffect(() => {
     const initializeApp = async () => {
@@ -140,7 +168,7 @@ function App() {
 
   return (
     <div className="app-container">
-      <Header user={user} onLogin={login} />
+      <Header user={user} onLogin={login} whatsappStatus={whatsappStatus} />
 
       <main className="content">
         {product ? (
@@ -167,6 +195,49 @@ function App() {
         )}
 
         <FeatureGrid product={product} />
+        
+        {/* WhatsApp Settings Section */}
+        {user && !isWhatsAppVerified && (
+          <div className="whatsapp-section">
+            {!showWhatsAppSettings && (
+              <button
+                className="btn btn-whatsapp-cta w-full"
+                onClick={() => {
+                  setShowWhatsAppSettings(true);
+                  startVerification();
+                }}
+              >
+                <span>📱</span>
+                <span>Enable WhatsApp Alerts</span>
+              </button>
+            )}
+
+            {showWhatsAppSettings && (
+              <WhatsAppSettings
+                step={whatsappStep}
+                phoneNumber={phoneNumber}
+                setPhoneNumber={setPhoneNumber}
+                otp={otp}
+                setOtp={setOtp}
+                loading={whatsappLoading}
+                error={whatsappError}
+                successMessage={whatsappSuccess}
+                whatsappStatus={whatsappStatus}
+                serviceStatus={serviceStatus}
+                qrCodeDataUrl={qrCodeDataUrl}
+                onStartPairing={handleStartPairing}
+                onRefreshPairing={handleRefreshPairing}
+                onSendOtp={handleSendOtp}
+                onVerifyOtp={handleVerifyOtp}
+                onToggle={handleToggle}
+                onReset={handleReset}
+                onStartVerification={startVerification}
+                onClose={() => setShowWhatsAppSettings(false)}
+              />
+            )}
+          </div>
+        )}
+
         <Watchlist
           trackedProducts={trackedProducts}
           onRemoveItem={handleRemove}

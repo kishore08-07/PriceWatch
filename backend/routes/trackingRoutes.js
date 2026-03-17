@@ -7,7 +7,8 @@ const {
     deleteTracking,
     removeTracking,
     checkNow,
-    testEmail
+    testEmail,
+    testWhatsApp
 } = require('../controllers/trackingController');
 
 router.post('/add', addTracking);
@@ -17,5 +18,6 @@ router.delete('/delete/:id', deleteTracking);
 router.delete('/remove/:email/:url', removeTracking);
 router.post('/check-now/:id', checkNow);
 router.post('/test-email/:id', testEmail);
+router.post('/test-whatsapp/:id', testWhatsApp);
 
 module.exports = router;

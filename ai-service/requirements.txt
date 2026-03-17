@@ -11,5 +11,9 @@ torch==2.5.1           # CPU-only; use torch==2.5.1+cu121 for CUDA
 sentencepiece==0.2.0   # Required by some tokenizers
 protobuf==5.29.2       # Required by sentencepiece
 
+# Text preprocessing
+emoji==2.14.0          # Emoji → text conversion
+langdetect==1.0.9      # Language detection for mixed-language reviews
+
 # Validation
 pydantic==2.10.3

@@ -2,8 +2,49 @@ import { getScopedElement, trimPrice } from '../utils/priceParser';
 import { extractImage } from '../utils/imageExtractor';
 import { FLIPKART_SELECTORS } from '../selectors/flipkartSelectors';
 
+/**
+ * Extract brand and model from Flipkart product page.
+ */
+export const extractFlipkartBrandModel = () => {
+    let brand = '';
+    let model = '';
 
-// Helper: fallback to scan for product name
+    // Try specification table (Flipkart uses various class patterns)
+    const specRows = document.querySelectorAll('table._14cfVK tr, ._3k-BhJ tr, [class*="spec"] tr, ._1UhVsV tr');
+    for (const row of specRows) {
+        const text = row.innerText || '';
+        if (/brand/i.test(text) && !brand) {
+            const parts = text.split(/\n|:/).map(s => s.trim()).filter(Boolean);
+            brand = parts[parts.length - 1] || '';
+        }
+        if (/model\s*(number|name)?/i.test(text) && !model) {
+            const parts = text.split(/\n|:/).map(s => s.trim()).filter(Boolean);
+            model = parts[parts.length - 1] || '';
+        }
+    }
+
+    // Breadcrumb for brand (Flipkart breadcrumbs often include brand)
+    if (!brand) {
+        const breadcrumbs = document.querySelectorAll('._1MR4o5 a, ._2whKao a, [class*="breadcrumb"] a');
+        const bcTexts = Array.from(breadcrumbs).map(a => a.innerText.trim());
+        // Brand is often the 3rd or 4th breadcrumb
+        for (const text of bcTexts) {
+            if (text.length > 1 && text.length < 30 && !/home|flipkart|all/i.test(text)) {
+                brand = text;
+            }
+        }
+    }
+
+    // Meta tag fallback
+    if (!brand) {
+        const metaBrand = document.querySelector('meta[property="og:brand"], meta[name="brand"]');
+        if (metaBrand) brand = metaBrand.content || '';
+    }
+
+    return { brand, model };
+};
+
+
 function findProductNameFallback() {
     // Try any h1 with text
     const h1 = document.querySelector('h1');
@@ -26,7 +67,7 @@ function getFlipkartPrice() {
         '._30jeq3._16Jk6d',  // Common product page price
         '._30jeq3',           // Alternative class
     ];
-    
+
     for (const selector of knownSelectors) {
         const el = document.querySelector(selector);
         if (el && el.offsetParent !== null) { // Must be visible
@@ -40,7 +81,7 @@ function getFlipkartPrice() {
             }
         }
     }
-    
+
     // Strategy 2: Try observed React container pattern
     const reactContainer = document.querySelector("div.vzwn2j[class*='1psv1ze']");
     if (reactContainer && reactContainer.offsetParent !== null) {
@@ -52,43 +93,43 @@ function getFlipkartPrice() {
             }
         }
     }
-    
+
     // Strategy 3: Scan all visible <div> and <span> elements
     const priceCandidates = [];
     const elements = document.querySelectorAll('div, span');
-    
+
     for (const el of elements) {
         // Skip if element has children (we want leaf text nodes)
         if (el.children.length > 0) continue;
-        
+
         // Must be visible to user
         if (el.offsetParent === null) continue;
-        
+
         // Skip hidden containers (meta, script, style, etc.)
         const tagName = el.tagName.toLowerCase();
         if (['meta', 'script', 'style', 'link', 'noscript'].includes(tagName)) continue;
-        
+
         const text = el.innerText && el.innerText.trim();
         if (!text || !text.includes('₹')) continue;
-        
+
         // Text should be reasonably short (not a paragraph)
         if (text.length > 30) continue;
-        
+
         // Exclude strikethrough (original/MRP price)
         const style = window.getComputedStyle(el);
         if (style.textDecoration.includes('line-through')) continue;
-        
+
         // Exclude discount/offer text
         if (/off|save|discount|%|\bMRP\b|\blist price\b|\bdeal\b/i.test(text)) continue;
-        
+
         const price = trimPrice(text);
-        
+
         // Guard: reject values with < 4 digits
         if (!price || price < 1000) continue;
-        
+
         // Get font size for comparison (real price is usually largest)
         const fontSize = parseFloat(style.fontSize);
-        
+
         priceCandidates.push({
             price,
             text,
@@ -96,14 +137,14 @@ function getFlipkartPrice() {
             el
         });
     }
-    
+
     if (priceCandidates.length === 0) {
         return null; // No valid price found
     }
-    
+
     // Pick the element with largest font-size (current price is visually prominent)
     priceCandidates.sort((a, b) => b.fontSize - a.fontSize);
-    
+
     return priceCandidates[0].text;
 }
 
@@ -120,7 +161,7 @@ export const scrapeFlipkart = () => {
     // Check availability - if we found a valid price, product is available
     // Price presence indicates the selected variant is in stock
     let available = true;
-    
+
     if (!priceText || trimPrice(priceText) === null) {
         // Only check unavailability if no price was found
         // Look for prominent unavailability messages (large text, near top of page)
@@ -128,22 +169,22 @@ export const scrapeFlipkart = () => {
         for (const el of unavailabilityElements) {
             // Only check visible, prominent elements (large font, high up on page)
             if (el.offsetParent === null) continue;
-            
+
             const text = el.innerText && el.innerText.toLowerCase().trim();
             if (!text || text.length > 150) continue; // Skip long paragraphs
-            
+
             // Check if it's a prominent message (font size > 14px)
             const style = window.getComputedStyle(el);
             const fontSize = parseFloat(style.fontSize);
             if (fontSize < 14) continue;
-            
+
             // Check for unavailability keywords in prominent locations
             for (const keyword of unavailabilityKeywords) {
                 if (text.includes(keyword)) {
                     // Make sure it's not inside variant selector or review text
                     const upperText = el.innerText.toUpperCase();
                     if (upperText.includes('VARIANT') || upperText.includes('REVIEW')) continue;
-                    
+
                     available = false;
                     break;
                 }
@@ -163,3 +204,10 @@ export const scrapeFlipkart = () => {
         available
     };
 };
+
+export const scrapeFlipkartExtended = () => {
+    const base = scrapeFlipkart();
+    const { brand, model } = extractFlipkartBrandModel();
+    return { ...base, brand, model };
+};
+

@@ -1,6 +1,8 @@
 {
   "dependencies": {
+    "@whiskeysockets/baileys": "^7.0.0-rc.9",
     "axios": "^1.13.4",
+    "cheerio": "^1.2.0",
     "cors": "^2.8.5",
     "dotenv": "^17.2.3",
     "express": "^5.2.1",
@@ -8,6 +10,9 @@
     "jsonwebtoken": "^9.0.3",
     "mongoose": "^9.1.5",
     "node-cron": "^4.2.1",
-    "nodemailer": "^7.0.13"
+    "nodemailer": "^7.0.13",
+    "pino": "^10.3.1",
+    "puppeteer": "^24.37.5",
+    "qrcode-terminal": "^0.12.0"
   }
 }

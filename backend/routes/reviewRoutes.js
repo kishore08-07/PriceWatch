@@ -18,7 +18,7 @@ const {
   orchestrateAnalysis,
   invalidateCache,
 } = require('../services/reviewOrchestrator');
-const { checkHealth: checkPythonHealth } = require('../services/pythonNlpClient');
+const { checkHealth: checkPythonHealth, getCircuitStatus } = require('../services/pythonNlpClient');
 const cacheService = require('../utils/cacheService');
 
 // ── POST /api/reviews/analyze-direct ─────────────────────────────────────────
@@ -44,7 +44,7 @@ const cacheService = require('../utils/cacheService');
  */
 router.post('/analyze-direct', async (req, res) => {
   try {
-    const { url, reviews, skipCache = false, totalScraped } = req.body;
+    const { url, reviews, skipCache = false, totalScraped, cookies = '' } = req.body;
 
     if (!url || typeof url !== 'string' || url.trim() === '') {
       return res.status(400).json({
@@ -117,6 +117,7 @@ router.post('/analyze-direct', async (req, res) => {
     const result = await orchestrateAnalysis(url.trim(), reviews, {
       skipCache: effectiveSkipCache,
       totalScraped: freshTotalScraped,
+      cookies,
     });
 
     if (!result.success) {
@@ -184,11 +185,13 @@ router.post('/invalidate-cache', (req, res) => {
 router.get('/health', async (req, res) => {
   const cacheStats = cacheService.getCacheStats();
   const pythonOk = await checkPythonHealth();
+  const circuitStatus = getCircuitStatus();
 
   return res.status(200).json({
     status: 'ok',
     service: 'review-analysis',
     pythonAiService: pythonOk ? 'reachable' : 'unreachable',
+    circuitBreaker: circuitStatus,
     cache: cacheStats,
     timestamp: new Date().toISOString(),
   });

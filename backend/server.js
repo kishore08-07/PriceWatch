@@ -7,6 +7,7 @@ const connectDatabase = require('./config/database');
 const routes = require('./routes');
 const errorHandler = require('./middlewares/errorHandler');
 const { startScheduler } = require('./jobs/scheduler');
+const whatsappService = require('./services/whatsappService');
 
 const app = express();
 
@@ -28,6 +29,14 @@ app.use(errorHandler);
 
 // Start cron scheduler
 startScheduler();
+
+// Initialize WhatsApp service (auto-connects if session exists)
+if (process.env.WHATSAPP_ENABLED !== 'false') {
+    whatsappService.initialize().catch(err => {
+        console.warn('[Server] WhatsApp auto-initialization failed:', err.message);
+        console.warn('[Server] Use POST /api/whatsapp/initialize to connect manually.');
+    });
+}
 
 // Start server
 const PORT = 8000;

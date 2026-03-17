@@ -15,6 +15,11 @@ const trackingSchema = new mongoose.Schema({
     notified: { type: Boolean, default: false },
     notifiedAt: Date,
     lastNotifiedPrice: Number,  
+    lastNotificationChannels: {
+        email: { type: Boolean, default: false },
+        whatsapp: { type: Boolean, default: false },
+        timestamp: Date
+    },
     repeatAlerts: { type: Boolean, default: false },
     failureCount: { type: Number, default: 0 },
     lastError: String,

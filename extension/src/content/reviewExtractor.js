@@ -151,14 +151,20 @@ function isBotBlockedPage(html) {
  * @returns {Promise<string|null>} HTML string, or null on total failure
  */
 async function fetchPage(url) {
-  // Strategy 1: Direct fetch from content script
+  const FETCH_TIMEOUT_MS = 8000; // 8-second timeout per strategy
+
+  // Strategy 1: Direct fetch from content script (with timeout)
   try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
     const resp = await fetch(url, {
       credentials: 'include',
       headers: {
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
       },
+      signal: controller.signal,
     });
+    clearTimeout(timer);
     if (resp.ok) {
       const html = await resp.text();
       if (!isBotBlockedPage(html)) return html;
@@ -170,13 +176,12 @@ async function fetchPage(url) {
     console.warn('[fetchPage] Direct fetch failed:', e.message);
   }
 
-  // Strategy 2: Background MAIN-world fetch — runs fetch() inside the page's own
-  // JS context so Origin/Referer look like a normal same-site request.
+  // Strategy 2: Background MAIN-world fetch with timeout
   try {
-    const result = await chrome.runtime.sendMessage({
-      action: 'FETCH_PAGE',
-      url,
-    });
+    const result = await Promise.race([
+      chrome.runtime.sendMessage({ action: 'FETCH_PAGE', url }),
+      new Promise((resolve) => setTimeout(() => resolve({ error: 'timeout' }), FETCH_TIMEOUT_MS)),
+    ]);
     if (result?.html && !isBotBlockedPage(result.html)) return result.html;
     if (result?.html) console.warn('[fetchPage] MAIN-world fetch also returned bot/CAPTCHA page');
     if (result?.error) console.warn('[fetchPage] Background fetch error:', result.error);
@@ -514,9 +519,17 @@ async function fetchAmazonPaginatedReviews(maxPages = 50) {
 
     // ── Fetch remaining pages ────────────────────────────────────────────────
     let consecutiveFailures = 0;
-    const MAX_CONSECUTIVE_FAILURES = 3;
+    const MAX_CONSECUTIVE_FAILURES = 2; // Fail fast — backend will supplement via server-side scraping
+    const PAGINATION_TIMEOUT_MS = 30_000; // 30-second overall pagination timeout
+    const paginationStart = Date.now();
 
     for (let page = 2; page <= estimatedPages; page++) {
+      // Check overall timeout
+      if (Date.now() - paginationStart > PAGINATION_TIMEOUT_MS) {
+        console.log(`[ReviewExtractor:Amazon] Pagination timeout (${PAGINATION_TIMEOUT_MS / 1000}s) — stopping`);
+        break;
+      }
+
       try {
         baseUrl.searchParams.set('pageNumber', String(page));
 
@@ -525,7 +538,7 @@ async function fetchAmazonPaginatedReviews(maxPages = 50) {
           console.warn(`[ReviewExtractor:Amazon] Page ${page}: fetch failed`);
           consecutiveFailures++;
           if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
-            console.warn('[ReviewExtractor:Amazon] Too many consecutive failures — stopping');
+            console.warn('[ReviewExtractor:Amazon] Too many consecutive failures — backend will supplement');
             break;
           }
           continue;
@@ -845,10 +858,17 @@ async function fetchFlipkartPaginatedReviews(maxPages = 50) {
     console.log('[ReviewExtractor:Flipkart] All-reviews URL:', allReviewsHref);
 
     let consecutiveFailures = 0;
-    const MAX_CONSECUTIVE_FAILURES = 3;
+    const MAX_CONSECUTIVE_FAILURES = 2; // Fail fast — backend will supplement
+    const PAGINATION_TIMEOUT_MS = 30_000;
+    const paginationStart = Date.now();
     let consecutiveEmpty = 0;
 
     for (let page = 1; page <= maxPages; page++) {
+      if (Date.now() - paginationStart > PAGINATION_TIMEOUT_MS) {
+        console.log(`[ReviewExtractor:Flipkart] Pagination timeout — stopping`);
+        break;
+      }
+
       try {
         const pageUrl = new URL(allReviewsHref);
         pageUrl.searchParams.set('page', String(page));

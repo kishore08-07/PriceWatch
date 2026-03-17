@@ -10,6 +10,17 @@ const Icons = {
       <circle cx="12" cy="7" r="4" />
     </svg>
   ),
+  Mail: ({ size = 14 }) => (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+      <rect x="3" y="5" width="18" height="14" rx="2" ry="2" />
+      <polyline points="3 7 12 13 21 7" />
+    </svg>
+  ),
+  MessageCircle: ({ size = 14 }) => (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+      <path d="M21 11.5a8.5 8.5 0 0 1-8.5 8.5c-1.5 0-2.91-.39-4.14-1.08L3 20l1.2-4.25A8.5 8.5 0 1 1 21 11.5z" />
+    </svg>
+  ),
   Check: () => (
     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
       <polyline points="20 6 9 17 4 12" />

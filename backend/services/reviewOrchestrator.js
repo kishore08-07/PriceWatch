@@ -20,6 +20,14 @@ const { extractHighSignalReviews } = require('./reviewExtractionService');
 const { sanitizeText } = require('../utils/sanitizer');
 const cacheService = require('../utils/cacheService');
 const pythonNlpClient = require('./pythonNlpClient');
+const { scrapeReviews } = require('./reviewScrapingService');
+
+// ── Limits & Timeouts ─────────────────────────────────────────────────────────
+const MAX_REVIEWS_PER_REQUEST = 2000;   // Hard cap on reviews sent to Python
+const MAX_REVIEW_TEXT_CHARS = 5000;     // Per-review text char limit
+const PIPELINE_TIMEOUT_MS = 5 * 60 * 1000; // 5 minute total pipeline timeout
+const DEFAULT_CACHE_TTL_MS = 6 * 60 * 60 * 1000; // 6 hours
+const SERVER_SCRAPE_THRESHOLD = 30;    // If extension sends < this, trigger server-side scraping
 
 // ── Platform helpers ──────────────────────────────────────────────────────────
 
@@ -55,8 +63,8 @@ function detectPlatform(url) {
 function extractProductId(url, platform) {
   try {
     if (platform === 'amazon') {
-      const m = url.match(/\/dp\/([A-Z0-9]{10})/i);
-      return m ? m[1] : _fallbackId(url);
+      const m = url.match(/\/(?:dp|gp\/product|product-reviews|ASIN)\/([A-Z0-9]{10})/i);
+      return m ? m[1].toUpperCase() : _fallbackId(url);
     }
     if (platform === 'flipkart') {
       const m = url.match(/\/p\/itm([a-zA-Z0-9]{16})/);
@@ -95,15 +103,22 @@ function validateAndSanitizeReviews(rawReviews) {
   }
 
   const sanitized = rawReviews
-    .filter((r) => r && typeof r.text === 'string')
-    .map((r) => ({
-      text: sanitizeText(r.text, { maxLength: 0 }),
-      rating: parseFloat(r.rating) || 3.0,
-      author: r.author || 'Anonymous',
-      title: r.title || '',
-      date: r.date || new Date().toISOString(),
-      helpfulCount: parseInt(r.helpfulCount, 10) || 0,
-    }))
+    .filter((r) => r && typeof r.text === 'string' && r.text.length > 0)
+    .map((r) => {
+      let text = sanitizeText(r.text, { maxLength: 0 });
+      // Cap individual review text length
+      if (text.length > MAX_REVIEW_TEXT_CHARS) {
+        text = text.substring(0, MAX_REVIEW_TEXT_CHARS);
+      }
+      return {
+        text,
+        rating: parseFloat(r.rating) || 3.0,
+        author: (r.author || 'Anonymous').substring(0, 100),
+        title: (r.title || '').substring(0, 500),
+        date: r.date || '',
+        helpfulCount: parseInt(r.helpfulCount, 10) || 0,
+      };
+    })
     .filter((r) => r.text.length >= 5);
 
   if (sanitized.length === 0) {
@@ -150,11 +165,8 @@ function invalidateCache(url) {
  * @returns {Promise<Object>} Structured analysis result
  */
 async function orchestrateAnalysis(url, rawReviews, options = {}) {
-  const {
-    skipCache = false,
-    cacheTtlMs = 6 * 60 * 60 * 1000, // 6 hours
-    totalScraped = rawReviews.length, // total scraped by extension (before any NLP filtering)
-  } = options;
+  const { skipCache = false, cacheTtlMs = 6 * 60 * 60 * 1000, cookies = '' } = options;
+  let effectiveTotalScraped = options.totalScraped || rawReviews.length;
 
   const pipelineStart = Date.now();
 
@@ -182,24 +194,74 @@ async function orchestrateAnalysis(url, rawReviews, options = {}) {
     }
   }
 
-  // ── 3. Validate + sanitise reviews ───────────────────────────────────────
-  const {
-    valid: reviewsValid,
-    reviews: sanitizedReviews,
-    error: reviewError,
-  } = validateAndSanitizeReviews(rawReviews);
-
-  if (!reviewsValid) {
-    return { success: false, error: reviewError, platform, productId };
-  }
+  // ── 3. Validate + sanitise extension reviews ─────────────────────────────
+  const validationResult = validateAndSanitizeReviews(rawReviews);
+  let sanitizedReviews = validationResult.valid ? validationResult.reviews : [];
 
   const droppedBySanitize = rawReviews.length - sanitizedReviews.length;
   console.log(`🧹 [Orchestrator] Step 1 — Sanitize`);
-  console.log(`   Input    : ${rawReviews.length} raw reviews`);
+  console.log(`   Input    : ${rawReviews.length} raw reviews from extension`);
   console.log(`   Passed   : ${sanitizedReviews.length} reviews (≥ 5 chars, valid text)`);
   if (droppedBySanitize > 0)
     console.log(`   Dropped  : ${droppedBySanitize} (too short / non-string)`);
   console.log(`   Platform : ${platform}  |  Product: ${productId}`);
+
+  // ── 3b. Server-side scraping supplement ────────────────────────────────────
+  //    If the extension couldn't paginate (blocked by Sec-Fetch headers),
+  //    the backend fetches review pages server-side using axios (no Sec-Fetch).
+  if (
+    sanitizedReviews.length < SERVER_SCRAPE_THRESHOLD &&
+    (platform === 'amazon' || platform === 'flipkart')
+  ) {
+    console.log(
+      `📡 [Orchestrator] Extension provided only ${sanitizedReviews.length} reviews (< ${SERVER_SCRAPE_THRESHOLD}) ` +
+      `— supplementing with server-side scraping…`
+    );
+    try {
+      const scrapeResult = await scrapeReviews(url, platform, undefined, cookies);
+
+      if (scrapeResult.reviews.length > 0) {
+        console.log(
+          `📡 [Orchestrator] Server scraped: ${scrapeResult.reviews.length} reviews ` +
+          `(${scrapeResult.pagesScraped} pages, ${scrapeResult.totalFound || '?'} total on site)`
+        );
+
+        // Validate + sanitise server-scraped reviews
+        const serverValidation = validateAndSanitizeReviews(scrapeResult.reviews);
+        const serverReviews = serverValidation.valid ? serverValidation.reviews : [];
+
+        // Merge extension + server reviews, deduplicate by text fingerprint
+        const merged = [...sanitizedReviews, ...serverReviews];
+        const seen = new Set();
+        sanitizedReviews = merged.filter((r) => {
+          const fp = (r.text || '').toLowerCase().replace(/[^a-z0-9]/g, '').substring(0, 120);
+          if (fp.length < 10 || seen.has(fp)) return false;
+          seen.add(fp);
+          return true;
+        });
+
+        effectiveTotalScraped = scrapeResult.totalFound || sanitizedReviews.length;
+
+        console.log(
+          `📡 [Orchestrator] After merge + dedup: ${sanitizedReviews.length} unique reviews ` +
+          `(site total: ${effectiveTotalScraped})`
+        );
+      }
+    } catch (scrapeErr) {
+      console.warn(`[Orchestrator] Server-side scraping failed: ${scrapeErr.message}`);
+      // Continue gracefully with extension-only reviews
+    }
+  }
+
+  // Bail if we still have no reviews after server-side attempt
+  if (sanitizedReviews.length === 0) {
+    return {
+      success: false,
+      error: 'No valid reviews found. The product may not have reviews, or scraping was blocked.',
+      platform,
+      productId,
+    };
+  }
 
   // ── 4. High-signal review extraction (process ALL reviews) ────────────────
   const highSignal = extractHighSignalReviews(sanitizedReviews, {
@@ -216,19 +278,36 @@ async function orchestrateAnalysis(url, rawReviews, options = {}) {
   console.log(`   Sending → Python AI service…`);
 
   // ── 5. Python NLP inference (BART + DistilBERT + RoBERTa) ────────────────
+  // Cap the number of reviews sent to avoid overwhelming the Python service
+  let reviewsToSend = reviewsForAnalysis;
+  if (reviewsToSend.length > MAX_REVIEWS_PER_REQUEST) {
+    console.log(`[Orchestrator] Capping reviews: ${reviewsToSend.length} → ${MAX_REVIEWS_PER_REQUEST}`);
+    reviewsToSend = reviewsToSend.slice(0, MAX_REVIEWS_PER_REQUEST);
+  }
+
   let nlpResult;
   try {
-    nlpResult = await pythonNlpClient.analyzeReviews(reviewsForAnalysis, {
-      platform,
-      productId,
-    });
+    // Wrap the NLP call in a pipeline-level timeout
+    nlpResult = await Promise.race([
+      pythonNlpClient.analyzeReviews(reviewsToSend, { platform, productId }),
+      new Promise((_, reject) =>
+        setTimeout(
+          () => reject(new Error(`Pipeline timeout after ${PIPELINE_TIMEOUT_MS / 1000}s`)),
+          PIPELINE_TIMEOUT_MS
+        )
+      ),
+    ]);
   } catch (err) {
     console.error(`[Orchestrator] Python NLP service error: ${err.message}`);
+    const circuitStatus = pythonNlpClient.getCircuitStatus
+      ? pythonNlpClient.getCircuitStatus()
+      : null;
     return {
       success: false,
       error: `AI service unavailable: ${err.message}`,
       platform,
       productId,
+      circuitBreaker: circuitStatus,
       hint: 'Start the Python service: cd ai-service && uvicorn app:app --port 5001',
     };
   }
@@ -238,13 +317,16 @@ async function orchestrateAnalysis(url, rawReviews, options = {}) {
     success: true,
     platform,
     productId,
-    totalReviews: reviewsForAnalysis.length,   // reviews that went through AI
-    totalScraped,                               // total scraped by extension
+    totalReviews: nlpResult.totalReviews || reviewsForAnalysis.length,
+    totalAnalyzed: nlpResult.totalAnalyzed || reviewsForAnalysis.length,
+    totalScraped: effectiveTotalScraped,
     sentimentScore: nlpResult.sentimentScore,
     sentimentDistribution: nlpResult.sentimentDistribution,
     pros: nlpResult.pros || [],
     cons: nlpResult.cons || [],
     summary: nlpResult.summary || '',
+    preprocessingStats: nlpResult.preprocessingStats || null,
+    modelDetails: nlpResult.modelDetails || null,
     processingTimeMs: nlpResult.processingTimeMs,
     pipelineTimeMs: Date.now() - pipelineStart,
     fromCache: false,
@@ -254,7 +336,7 @@ async function orchestrateAnalysis(url, rawReviews, options = {}) {
   cacheService.setCache(cacheKey, result, cacheTtlMs);
   console.log(`💾 [Orchestrator] Step 4 — Cached as '${cacheKey}' (TTL 6h)`);
   console.log(`🏁 [Orchestrator] Pipeline complete in ${result.pipelineTimeMs}ms`);
-  console.log(`   Scraped  : ${totalScraped}  |  Analyzed: ${reviewsForAnalysis.length}  |  Score: ${result.sentimentScore}`);
+  console.log(`   Scraped  : ${effectiveTotalScraped}  |  Analyzed: ${reviewsForAnalysis.length}  |  Score: ${result.sentimentScore}`);
   console.log(`   Pros: ${result.pros.length}  |  Cons: ${result.cons.length}  |  Summary: ${result.summary.length} chars`);
 
   return result;

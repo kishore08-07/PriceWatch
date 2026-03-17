@@ -1,11 +1,12 @@
 /**
- * Sentiment Chart Component
- * Displays sentiment distribution as a bar chart
+ * Sentiment Chart Component — Production Build
+ * Displays sentiment distribution as a bar chart with count labels and
+ * an overall sentiment score badge.
  */
 
 import React from 'react';
 
-const SentimentChart = ({ distribution, score }) => {
+const SentimentChart = ({ distribution, score, totalAnalyzed }) => {
     if (!distribution) {
         return null;
     }
@@ -33,7 +34,14 @@ const SentimentChart = ({ distribution, score }) => {
     return (
         <div className="sentiment-chart">
             <div className="sentiment-header">
-                <h3>Overall Sentiment <span className="sentiment-total">({total} reviews)</span></h3>
+                <h3>
+                    Overall Sentiment
+                    {totalAnalyzed != null && (
+                        <span className="sentiment-total">
+                            ({totalAnalyzed} review{totalAnalyzed !== 1 ? 's' : ''})
+                        </span>
+                    )}
+                </h3>
                 <div className="sentiment-score">
                     <span
                         className="sentiment-badge"
@@ -47,21 +55,27 @@ const SentimentChart = ({ distribution, score }) => {
 
             <div className="sentiment-bar-container">
                 <div className="sentiment-bar">
-                    <div
-                        className="sentiment-segment positive"
-                        style={{ width: `${positivePercent}%` }}
-                        title={`Positive: ${distribution.positive}`}
-                    />
-                    <div
-                        className="sentiment-segment neutral"
-                        style={{ width: `${neutralPercent}%` }}
-                        title={`Neutral: ${distribution.neutral}`}
-                    />
-                    <div
-                        className="sentiment-segment negative"
-                        style={{ width: `${negativePercent}%` }}
-                        title={`Negative: ${distribution.negative}`}
-                    />
+                    {positivePercent > 0 && (
+                        <div
+                            className="sentiment-segment positive"
+                            style={{ width: `${positivePercent}%` }}
+                            title={`Positive: ${distribution.positive} (${positivePercent.toFixed(1)}%)`}
+                        />
+                    )}
+                    {neutralPercent > 0 && (
+                        <div
+                            className="sentiment-segment neutral"
+                            style={{ width: `${neutralPercent}%` }}
+                            title={`Neutral: ${distribution.neutral} (${neutralPercent.toFixed(1)}%)`}
+                        />
+                    )}
+                    {negativePercent > 0 && (
+                        <div
+                            className="sentiment-segment negative"
+                            style={{ width: `${negativePercent}%` }}
+                            title={`Negative: ${distribution.negative} (${negativePercent.toFixed(1)}%)`}
+                        />
+                    )}
                 </div>
             </div>
 
@@ -69,19 +83,19 @@ const SentimentChart = ({ distribution, score }) => {
                 <div className="legend-item">
                     <span className="legend-color positive" />
                     <span className="legend-label">
-                        Positive ({distribution.positive})
+                        Positive ({distribution.positive} · {positivePercent.toFixed(0)}%)
                     </span>
                 </div>
                 <div className="legend-item">
                     <span className="legend-color neutral" />
                     <span className="legend-label">
-                        Neutral ({distribution.neutral})
+                        Neutral ({distribution.neutral} · {neutralPercent.toFixed(0)}%)
                     </span>
                 </div>
                 <div className="legend-item">
                     <span className="legend-color negative" />
                     <span className="legend-label">
-                        Negative ({distribution.negative})
+                        Negative ({distribution.negative} · {negativePercent.toFixed(0)}%)
                     </span>
                 </div>
             </div>

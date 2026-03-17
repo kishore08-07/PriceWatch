@@ -239,6 +239,34 @@ const testEmailNotification = async (id) => {
     };
 };
 
+const testWhatsAppNotification = async (id) => {
+    const { sendWhatsAppAlert } = require('./whatsappNotificationService');
+    const tracking = await Tracking.findById(id);
+
+    if (!tracking) {
+        throw new Error('Alert not found');
+    }
+
+    // Simulate a price drop 10% below target for the test message
+    const simulatedPrice = Math.round(tracking.targetPrice * 0.9);
+
+    const result = await sendWhatsAppAlert(tracking.userEmail, {
+        productName: tracking.productName,
+        currentPrice: simulatedPrice,
+        previousPrice: tracking.currentPrice,
+        targetPrice: tracking.targetPrice,
+        url: tracking.url,
+        platform: tracking.platform,
+        currency: tracking.currency
+    });
+
+    return {
+        simulatedPrice,
+        targetPrice: tracking.targetPrice,
+        whatsappResult: result
+    };
+};
+
 module.exports = {
     createOrUpdateTracking,
     checkIfTrackingExists,
@@ -247,5 +275,6 @@ module.exports = {
     deleteTrackingByUrl,
     checkPriceForTracking,
     triggerManualPriceCheck,
-    testEmailNotification
+    testEmailNotification,
+    testWhatsAppNotification
 };

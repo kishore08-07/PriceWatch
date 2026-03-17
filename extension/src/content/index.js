@@ -1,12 +1,18 @@
-import { getProductData } from './productScraper';
+import { getProductData, getProductDataExtended } from './productScraper';
 import { getRealReviews } from './reviewExtractor';
 
-console.log("[PriceWatch] Content script v5.0 (Review Extraction) injected.");
+console.log("[PriceWatch] Content script v6.0 (Price Comparison + Review Extraction) injected.");
 
 // Listen for messages from background / popup
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     if (request.action === 'GET_PRODUCT_DETAILS') {
         const data = getProductData();
+        sendResponse(data);
+        return true;
+    }
+
+    if (request.action === 'GET_PRODUCT_DETAILS_EXTENDED') {
+        const data = getProductDataExtended();
         sendResponse(data);
         return true;
     }
