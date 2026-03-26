@@ -1745,7 +1745,7 @@
   width: fit-content;
 }
 
-.confidence-badge {
+.price-delta-badge {
   display: inline-block;
   padding: 2px 6px;
   border-radius: 4px;
@@ -1754,22 +1754,22 @@
   width: fit-content;
 }
 
-.confidence-badge.high {
+.price-delta-badge.cheaper {
   background: rgba(16, 185, 129, 0.15);
   border: 1px solid rgba(16, 185, 129, 0.3);
   color: #10b981;
 }
 
-.confidence-badge.medium {
-  background: rgba(245, 158, 11, 0.15);
-  border: 1px solid rgba(245, 158, 11, 0.3);
-  color: #f59e0b;
-}
-
-.confidence-badge.low {
+.price-delta-badge.higher {
   background: rgba(239, 68, 68, 0.15);
   border: 1px solid rgba(239, 68, 68, 0.3);
   color: #ef4444;
+}
+
+.price-delta-badge.same {
+  background: rgba(148, 163, 184, 0.16);
+  border: 1px solid rgba(148, 163, 184, 0.35);
+  color: #cbd5e1;
 }
 
 /* Price Cell */

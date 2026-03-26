@@ -44,6 +44,7 @@ from preprocessing import (
     prepare_text_for_summary,
     prepare_texts_for_sentiment,
 )
+from keyphrase import extract_pros_cons
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -55,9 +56,9 @@ logger = logging.getLogger(__name__)
 # ── Constants ─────────────────────────────────────────────────────────────────
 MAX_REVIEWS = 2000                   # Hard cap on input reviews
 MAX_REVIEW_CHARS = 5000              # Per-review character limit
-ROBERTA_CONFIDENCE_THRESHOLD = 0.80  # Only run RoBERTa for DistilBERT scores below this
-SENTIMENT_BATCH_SIZE = 16            # Batch size for sentiment models
-BART_MAX_TOTAL_CHARS = 80_000       # Total chars cap for summarization
+ROBERTA_CONFIDENCE_THRESHOLD = 0.65  # Lower threshold => fewer RoBERTa passes, faster latency
+SENTIMENT_BATCH_SIZE = 32            # Larger batch for better throughput on CPU
+BART_MAX_TOTAL_CHARS = 24_000        # Keep summarization input focused and fast
 REQUEST_TIMEOUT_SECS = 300           # 5 minute global timeout
 
 # ── Model registry (lazy-loaded, cached in memory) ───────────────────────────
@@ -69,10 +70,13 @@ def get_model(name: str):
     """Load and cache a HuggingFace pipeline by name. Thread-safe via GIL."""
     if name not in _models:
         if name == "summarizer":
-            logger.info("[Model] Loading DistilBART summarizer…")
+            # philschmid/bart-large-cnn-samsum is fine-tuned on dialogues and
+            # conversations, producing far more natural consumer-review-style
+            # summaries than the CNN news-domain sshleifer/distilbart-cnn-12-6.
+            logger.info("[Model] Loading BART summarizer (bart-large-cnn-samsum)…")
             _models[name] = hf_pipeline(
                 "summarization",
-                model="sshleifer/distilbart-cnn-12-6",
+                model="philschmid/bart-large-cnn-samsum",
                 device=-1,
             )
         elif name == "distilbert":
@@ -180,14 +184,15 @@ class AnalyzeResponse(BaseModel):
 # ── BART Map-Reduce Summarization ─────────────────────────────────────────────
 
 def _summarize_chunk(chunk: str) -> str:
-    """Summarize a single text chunk using DistilBART."""
+    """Summarize a single text chunk using BART. Produces concise output."""
     model = get_model("summarizer")
     word_count = len(chunk.split())
     if word_count < 30:
         return chunk
 
-    max_new = min(120, max(30, word_count // 3))
-    min_new = max(10, min(25, max_new // 2))
+    # Tighter limits to produce concise 4-5 line summaries in general POV
+    max_new = min(80, max(25, word_count // 4))
+    min_new = max(10, min(20, max_new // 2))
     try:
         result = model(
             chunk,
@@ -228,6 +233,7 @@ def _map_reduce_summarize(chunks: List[str]) -> str:
         return chunk_summaries[0]
 
     # HIERARCHICAL REDUCE — keep combining until ≤ 1 summary
+    # Target: concise 4-5 line summary in general POV (not first-person)
     logger.info(f"[BART] Reduce phase: combining {len(chunk_summaries)} chunk summaries…")
     while len(chunk_summaries) > 1:
         next_level: List[str] = []
@@ -239,8 +245,9 @@ def _map_reduce_summarize(chunks: List[str]) -> str:
             if wc < 30:
                 next_level.append(batch_text)
                 continue
-            max_new = min(150, max(40, wc // 2))
-            min_new = max(15, min(35, max_new // 2))
+            # Tighter reduce limits for concise final summary
+            max_new = min(100, max(30, wc // 3))
+            min_new = max(10, min(25, max_new // 2))
             try:
                 result = model(
                     batch_text,
@@ -257,6 +264,218 @@ def _map_reduce_summarize(chunks: List[str]) -> str:
         logger.info(f"   [BART] Reduce: down to {len(chunk_summaries)} summaries")
 
     return chunk_summaries[0] if chunk_summaries else "Summary generation failed."
+
+
+def _clean_summary(summary: str) -> str:
+    """
+    Post-process BART summary to strip reviewer metadata fragments.
+    BART sometimes includes fragments like "Reviewed in India on March 2025",
+    "Pixel 10a has 270 ratings and 34 reviews", or "John from Delhi said"
+    because the input reviews contain product-page metadata.
+    """
+    if not summary:
+        return summary
+
+    # Patterns to remove from summary
+    patterns = [
+        # "[Product] has X ratings and Y reviews" / "X ratings" / "Y reviews"
+        r"\b[A-Za-z0-9][A-Za-z0-9 ]+\bhas\s+\d[\d,]*\s*(?:ratings?|reviews?)(?:\s+and\s+\d[\d,]*\s*(?:ratings?|reviews?))?\.?",
+        # Standalone "X ratings and Y reviews" / "X reviews" / "X ratings"
+        r"\b\d[\d,]*\s+(?:global\s+)?(?:customer\s+)?(?:ratings?|reviews?)(?:\s+and\s+\d[\d,]*\s+(?:ratings?|reviews?))?\.?",
+        # "Showing X-Y of Z"
+        r"\bshowing\s+\d+[\-–]\d+\s+of\s+\d+\.?",
+        # "Reviewed in [Country] on [Date]"
+        r"\breviewed\s+in\s+[A-Z][a-z]+(?:\s+on\s+[A-Z][a-z]+\s+\d{1,2},?\s*\d{2,4})?\.?",
+        # "X out of X stars"
+        r"\b\d+(?:\.\d+)?\s*out\s+of\s*\d+\s*stars?\.?",
+        # "X people found this helpful"
+        r"\b\d+\s+(?:people|person|customer)s?\s+found\s+this\s+(?:helpful|useful)\.?",
+        # "One person found this helpful"
+        r"\b(?:one|two|three|four|five|six|seven|eight|nine|ten)\s+(?:people|person|customer)s?\s+found\s+this\s+(?:helpful|useful)\.?",
+        # "Verified Purchase" / "Certified Buyer"
+        r"\bverified\s+purchase\.?",
+        r"\bcertified\s+buyer\.?",
+        # Date patterns like "March 15, 2025" or "15 March 2025"
+        r"\b(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},?\s*\d{2,4}\b",
+        r"\b\d{1,2}\s+(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{2,4}\b",
+        # "from [City], [Country]" reviewer location
+        r"\bfrom\s+[A-Z][a-z]+(?:\s*,\s*[A-Z][a-z]+)?\.?",
+        # "Report" / "Helpful" standalone
+        r"\bReport\b(?=[.\s]|$)",
+        r"\bHelpful\b(?=[.\s]|$)",
+        # "X days/months/years ago"
+        r"\b\d+\s*(?:day|week|month|year)s?\s+ago\.?",
+    ]
+
+    for pattern in patterns:
+        summary = re.sub(pattern, "", summary, flags=re.IGNORECASE)
+
+    # Drop whole metadata-heavy sentences that survived token-level cleanup.
+    sentence_meta_patterns = [
+        re.compile(r"\b\d[\d,]*\s+(?:ratings?|reviews?)\b", re.IGNORECASE),
+        re.compile(r"\bshowing\s+\d+[\-–]\d+\s+of\s+\d+\b", re.IGNORECASE),
+        re.compile(r"\breviewed\s+in\b", re.IGNORECASE),
+        re.compile(r"\bverified\s+purchase\b", re.IGNORECASE),
+        re.compile(r"\bcertified\s+buyer\b", re.IGNORECASE),
+        re.compile(r"\b\d+\s*(?:day|week|month|year)s?\s+ago\b", re.IGNORECASE),
+        re.compile(r"\b(?:one|two|three|four|five|six|seven|eight|nine|ten|\d+)\s+(?:people|person|customer)s?\s+found\s+this\b", re.IGNORECASE),
+    ]
+
+    sentences = re.split(r"(?<=[.!?])\s+", summary.strip())
+    filtered_sentences = []
+    for sentence in sentences:
+        s = sentence.strip()
+        if not s:
+            continue
+        if any(p.search(s) for p in sentence_meta_patterns):
+            continue
+        filtered_sentences.append(s)
+    if filtered_sentences:
+        summary = " ".join(filtered_sentences)
+
+    # Collapse whitespace and clean up leftover punctuation
+    summary = re.sub(r"\s{2,}", " ", summary)
+    summary = re.sub(r"\s+([.,;])", r"\1", summary)
+    summary = re.sub(r"([.,;])\1+", r"\1", summary)
+    # Trim leading punctuation/whitespace left after removals
+    summary = re.sub(r"^[.,;:\s]+", "", summary)
+    return summary.strip()
+
+
+def _cap_summary_length(summary: str, max_sentences: int = 6) -> str:
+    """
+    Enforce concise summary output — at most `max_sentences` sentences.
+    BART may sometimes produce verbose output; this is the hard backstop
+    ensuring the UI displays a tidy 4-5 line summary.
+    """
+    if not summary:
+        return summary
+
+    # Split by sentence-ending punctuation (period, exclamation, question mark)
+    sentences = re.split(r"(?<=[.!?])\s+", summary.strip())
+    if len(sentences) <= max_sentences:
+        return summary
+
+    # Keep the first max_sentences sentences
+    capped = " ".join(sentences[:max_sentences])
+    # Ensure it ends with proper punctuation
+    if not capped.endswith((".", "!", "?")):
+        capped += "."
+    return capped
+
+
+def _looks_like_spec_sentence(sentence: str) -> bool:
+    """Detect product-spec fragments that should not appear in review summaries."""
+    if not sentence:
+        return True
+
+    s = sentence.strip().lower()
+    if len(s) < 20:
+        return True
+
+    unit_hits = len(re.findall(r"\b\d+(?:\.\d+)?\s*(?:mm|cm|inch|inches|hz|mah|mp|gb|tb|w|watt|watts|v|nm)\b", s))
+    spec_terms = len(re.findall(r"\b(?:bluetooth|wi-?fi|ipx\d|ram|rom|storage|processor|chipset|display|resolution|camera|battery|refresh rate)\b", s))
+
+    # Mostly numeric spec strings are noisy when summarizing reviews.
+    numeric_ratio = sum(ch.isdigit() for ch in s) / max(1, len(s))
+    if unit_hits >= 2 or spec_terms >= 3 or numeric_ratio > 0.22:
+        return True
+
+    return False
+
+
+def _build_review_grounded_summary(cleaned_reviews: List[Dict], min_sentences: int = 5, max_sentences: int = 6) -> str:
+    """Create a concise extractive fallback summary using real review sentences."""
+    candidates: List[str] = []
+    seen = set()
+
+    for review in cleaned_reviews:
+        text = (review.get("text") or "").strip()
+        if not text:
+            continue
+        parts = re.split(r"(?<=[.!?])\s+", text)
+        for part in parts:
+            sentence = part.strip()
+            if len(sentence.split()) < 6:
+                continue
+            if _looks_like_spec_sentence(sentence):
+                continue
+            key = re.sub(r"[^a-z0-9]", "", sentence.lower())[:120]
+            if len(key) < 30 or key in seen:
+                continue
+            seen.add(key)
+            if not sentence.endswith((".", "!", "?")):
+                sentence += "."
+            candidates.append(sentence)
+            if len(candidates) >= max_sentences:
+                break
+        if len(candidates) >= max_sentences:
+            break
+
+    if not candidates:
+        return "Users report mixed experiences overall, with quality varying across individual usage scenarios."
+
+    # Prefer 5-6 lines when enough data exists.
+    if len(candidates) >= min_sentences:
+        return " ".join(candidates[:max_sentences])
+    return " ".join(candidates)
+
+
+def _to_general_pov(summary: str) -> str:
+    """
+    Convert common first-person fragments into a general consumer POV.
+    This is a lightweight post-process to keep summary language generic.
+    """
+    if not summary:
+        return summary
+
+    replacements = [
+        (r"\bI\b", "Users"),
+        (r"\bmy\b", "their"),
+        (r"\bme\b", "users"),
+        (r"\bwe\b", "Users"),
+        (r"\bour\b", "their"),
+        (r"\bus\b", "users"),
+    ]
+
+    out = summary
+    for pattern, repl in replacements:
+        out = re.sub(pattern, repl, out, flags=re.IGNORECASE)
+    out = re.sub(r"\s{2,}", " ", out).strip()
+    return out
+
+
+def _finalize_summary(summary: str, cleaned_reviews: List[Dict]) -> str:
+    """Normalize generated summary and enforce review-grounded 5-6 line output."""
+    summary = _clean_summary(summary or "")
+    summary = _to_general_pov(summary)
+
+    filtered_sentences = []
+    for sentence in re.split(r"(?<=[.!?])\s+", summary.strip()):
+        s = sentence.strip()
+        if not s:
+            continue
+        if _looks_like_spec_sentence(s):
+            continue
+        filtered_sentences.append(s if s.endswith((".", "!", "?")) else f"{s}.")
+
+    summary = " ".join(filtered_sentences)
+    summary = _cap_summary_length(summary, max_sentences=6)
+
+    # Ensure at least 5 lines when sufficient review data is present.
+    sentence_count = len([s for s in re.split(r"(?<=[.!?])\s+", summary.strip()) if s.strip()])
+    if sentence_count < 5 and len(cleaned_reviews) >= 5:
+        fallback = _build_review_grounded_summary(cleaned_reviews, min_sentences=5, max_sentences=6)
+        if summary:
+            merged = f"{summary} {fallback}".strip()
+            summary = _cap_summary_length(merged, max_sentences=6)
+        else:
+            summary = fallback
+
+    if not summary:
+        summary = _build_review_grounded_summary(cleaned_reviews, min_sentences=3, max_sentences=5)
+
+    return summary
 
 
 # ── Sentiment Analysis (DistilBERT + selective RoBERTa) ──────────────────────
@@ -364,24 +583,74 @@ def _merge_sentiment(
 
 
 def _compute_distribution(merged: List[Dict]) -> Dict[str, Any]:
-    """Compute sentiment distribution and a 0–100 sentiment score."""
+    """Compute confidence-aware sentiment distribution and a stable 0-100 score."""
     if not merged:
-        return {"positive": 0, "neutral": 0, "negative": 0, "total": 0, "sentimentScore": 50}
+        return {
+            "positive": 0,
+            "neutral": 0,
+            "negative": 0,
+            "total": 0,
+            "positivePct": 0,
+            "neutralPct": 0,
+            "negativePct": 0,
+            "dominantLabel": "neutral",
+            "sentimentScore": 50,
+            "polarity": 0.0,
+        }
 
     counts = {"positive": 0, "neutral": 0, "negative": 0}
-    score_sum = 0.0
+    pos_weighted = 0.0
+    neg_weighted = 0.0
+
+    def _clamp_conf(v: Any) -> float:
+        try:
+            f = float(v)
+        except Exception:
+            f = 0.5
+        return max(0.0, min(1.0, f))
+
     for r in merged:
         label = r["label"]
         counts[label] = counts.get(label, 0) + 1
+        confidence = _clamp_conf(r.get("score", 0.5))
+
         if label == "positive":
-            score_sum += r["score"]
+            pos_weighted += confidence
         elif label == "negative":
-            score_sum -= r["score"]
+            neg_weighted += confidence
 
     total = len(merged)
-    avg = score_sum / total  # range [-1, 1]
-    sentiment_score = max(0, min(100, int(round(((avg + 1) / 2) * 100))))
-    return {**counts, "total": total, "sentimentScore": sentiment_score}
+
+    # Neutral reviews should dampen polarity toward 50 but not force bias.
+    neutral_damp = 0.35 * counts["neutral"]
+    effective_total = max(1e-9, pos_weighted + neg_weighted + neutral_damp)
+
+    polarity = (pos_weighted - neg_weighted) / effective_total  # range roughly [-1, 1]
+    sentiment_score = max(0, min(100, int(round(50 + 50 * polarity))))
+
+    positive_pct = int(round((counts["positive"] / total) * 100))
+    neutral_pct = int(round((counts["neutral"] / total) * 100))
+    negative_pct = max(0, 100 - positive_pct - neutral_pct)
+
+    if counts["positive"] == counts["negative"] and abs(polarity) <= 0.05:
+        dominant_label = "neutral"
+    elif counts["positive"] > counts["negative"]:
+        dominant_label = "positive"
+    elif counts["negative"] > counts["positive"]:
+        dominant_label = "negative"
+    else:
+        dominant_label = "neutral"
+
+    return {
+        **counts,
+        "total": total,
+        "positivePct": positive_pct,
+        "neutralPct": neutral_pct,
+        "negativePct": negative_pct,
+        "dominantLabel": dominant_label,
+        "sentimentScore": sentiment_score,
+        "polarity": round(polarity, 4),
+    }
 
 
 # ── Pros / Cons Extraction ────────────────────────────────────────────────────
@@ -501,6 +770,12 @@ async def analyze_reviews(request: AnalyzeRequest):
         filter_spam=True,
         deduplicate=True,
         dedup_threshold=0.85,
+        # Only pass English reviews to DistilBERT (SST-2 is English-only).
+        # langdetect is already in preprocessing.py with a graceful fallback.
+        # Non-English reviews are typically transliterated Roman scripts (Hinglish)
+        # that DistilBERT can partially handle, so we use 'unknown' as a fallback
+        # language to retain reviews whose language cannot be determined.
+        allowed_languages=["en", "unknown"],
     )
 
     preprocess_ms = int((time.time() - preprocess_start) * 1000)
@@ -546,6 +821,8 @@ async def analyze_reviews(request: AnalyzeRequest):
 
     try:
         summary, distilbert_results = await asyncio.gather(summary_future, distilbert_future)
+        # Post-process summary to remove metadata/spec leakage and keep review-grounded output.
+        summary = _finalize_summary(summary, cleaned_reviews)
     except Exception as e:
         logger.error(f"[/analyze] Primary inference error: {e}")
         raise HTTPException(status_code=500, detail=f"Inference failed: {e}")
@@ -570,7 +847,21 @@ async def analyze_reviews(request: AnalyzeRequest):
     # ── Step 3: Merge + Structure ─────────────────────────────────────────────
     merged = _merge_sentiment(distilbert_results, roberta_results)
     distribution = _compute_distribution(merged)
-    pros_cons = _extract_pros_cons(cleaned_reviews, merged, top_n=5)
+
+    # Extract pros/cons using KeyBERT (product-specific keyphrases from positive
+    # and negative review subsets). Falls back to frequency counting if keybert
+    # is not installed.
+    pros_list, cons_list = extract_pros_cons(cleaned_reviews, top_n=5)
+
+    # For tiny datasets (1-2 reviews), avoid generating synthetic pros/cons.
+    # Return what is truly present; UI already handles empty sections gracefully.
+    if len(cleaned_reviews) >= 3:
+        if not pros_list or not cons_list:
+            fallback = _extract_pros_cons(cleaned_reviews, merged, top_n=5)
+            if not pros_list:
+                pros_list = fallback.get("pros", [])
+            if not cons_list:
+                cons_list = fallback.get("cons", [])
 
     pos = distribution["positive"]
     neu = distribution["neutral"]
@@ -588,7 +879,7 @@ async def analyze_reviews(request: AnalyzeRequest):
         logger.info(f"   Neutral  : {neu} ({neu/total_s*100:.1f}%)")
         logger.info(f"   Negative : {neg} ({neg/total_s*100:.1f}%)")
     logger.info(f"   Score    : {distribution['sentimentScore']}/100")
-    logger.info(f"   Pros: {len(pros_cons['pros'])}  |  Cons: {len(pros_cons['cons'])}")
+    logger.info(f"   Pros: {len(pros_list)}  |  Cons: {len(cons_list)}")
     logger.info(f"   RoBERTa ran on: {roberta_count}/{len(texts_for_sentiment)} reviews")
     logger.info(f"✅ Done in {elapsed_ms}ms  |  summary={len(summary)} chars")
     logger.info("=" * 60 + "\n")
@@ -596,8 +887,8 @@ async def analyze_reviews(request: AnalyzeRequest):
     return AnalyzeResponse(
         success=True,
         summary=summary,
-        pros=pros_cons["pros"],
-        cons=pros_cons["cons"],
+        pros=pros_list,
+        cons=cons_list,
         sentimentDistribution={
             "positive": distribution["positive"],
             "neutral": distribution["neutral"],

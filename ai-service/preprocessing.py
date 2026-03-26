@@ -219,10 +219,41 @@ def deduplicate_reviews(
 
 # ── Single review cleaning ────────────────────────────────────────────────────
 
+# ── Metadata patterns to strip from review text ─────────────────────────────
+# These fragments are product-page chrome, not actual review content.  BART
+# trains on whatever text it sees, so any metadata in the input leaks into the
+# generated summary (e.g. "Pixel 10a has 270 ratings and 34 reviews").
+_REVIEW_METADATA_PATTERNS = [
+    # "X ratings and Y reviews" / "X ratings" / "Y reviews" counts
+    re.compile(r"\b\d[\d,]*\s+(?:global\s+)?(?:customer\s+)?(?:ratings?|reviews?)(?:\s+and\s+\d[\d,]*\s+(?:ratings?|reviews?))?\b", re.IGNORECASE),
+    # "Showing 1-10 of 270" pagination text
+    re.compile(r"\bshowing\s+\d+[\-–]\d+\s+of\s+\d+\b", re.IGNORECASE),
+    # "Reviewed in India on 26 March 2026"
+    re.compile(r"\breviewed\s+in\s+[A-Za-z]+(?:\s+on\s+[A-Za-z]+\s+\d{1,2},?\s*\d{2,4})?\b", re.IGNORECASE),
+    # "X out of 5 stars"
+    re.compile(r"\b\d+(?:\.\d+)?\s*out\s+of\s*\d+\s*stars?\b", re.IGNORECASE),
+    # "X people found this helpful"
+    re.compile(r"\b\d+\s+(?:people|person|customer)s?\s+found\s+this\s+(?:helpful|useful)\b", re.IGNORECASE),
+    # "One person found this helpful"
+    re.compile(r"\b(?:one|two|three|four|five|six|seven|eight|nine|ten)\s+(?:people|person|customer)s?\s+found\s+this\s+(?:helpful|useful)\b", re.IGNORECASE),
+    # "Verified Purchase" / "Certified Buyer"
+    re.compile(r"\b(?:verified\s+purchase|certified\s+buyer)\b", re.IGNORECASE),
+    # "X days/months/years ago"
+    re.compile(r"\b\d+\s*(?:day|week|month|year)s?\s+ago\b", re.IGNORECASE),
+    # "Be the first to review" / "Write a review"
+    re.compile(r"\b(?:be\s+(?:the\s+)?first\s+(?:one\s+)?to\s+review|write\s+(?:a\s+)?review)\b", re.IGNORECASE),
+    # "from [City/Country]" reviewer location
+    re.compile(r"\bfrom\s+[A-Z][a-z]+(?:\s*,\s*[A-Z][a-z]+)?\b"),
+    # Standalone "Helpful" / "Report"
+    re.compile(r"\bHelpful\b(?=[.\s]|$)"),
+    re.compile(r"\bReport\b(?=[.\s]|$)"),
+]
+
+
 def clean_review_text(text: str) -> str:
     """
     Full cleaning pipeline for a single review string:
-      HTML strip → Unicode normalize → Emoji→text → Collapse whitespace.
+      HTML strip → Unicode normalize → Emoji→text → Metadata strip → Collapse whitespace.
     """
     if not text or not isinstance(text, str):
         return ""
@@ -233,6 +264,9 @@ def clean_review_text(text: str) -> str:
     text = text.replace("\u201c", '"').replace("\u201d", '"')
     text = text.replace("\u2018", "'").replace("\u2019", "'")
     text = text.replace("\u2014", "-").replace("\u2013", "-")
+    # Strip e-commerce metadata fragments that pollute BART input
+    for pattern in _REVIEW_METADATA_PATTERNS:
+        text = pattern.sub("", text)
     text = _WHITESPACE_RE.sub(" ", text)
     return text.strip()
 

@@ -4,9 +4,6 @@
  * POST /api/reviews/analyze-direct   — analyse reviews extracted by the extension
  * POST /api/reviews/invalidate-cache — bust the cache for a product
  * GET  /api/reviews/health           — health check (Node + Python service)
- *
- * Server-side review fetching has been intentionally removed.
- * Reviews are always extracted by the extension content script and forwarded here.
  */
 
 'use strict';
@@ -17,6 +14,8 @@ const router = express.Router();
 const {
   orchestrateAnalysis,
   invalidateCache,
+  detectPlatform,
+  extractProductId,
 } = require('../services/reviewOrchestrator');
 const { checkHealth: checkPythonHealth, getCircuitStatus } = require('../services/pythonNlpClient');
 const cacheService = require('../utils/cacheService');
@@ -44,7 +43,7 @@ const cacheService = require('../utils/cacheService');
  */
 router.post('/analyze-direct', async (req, res) => {
   try {
-    const { url, reviews, skipCache = false, totalScraped, cookies = '' } = req.body;
+    const { url, reviews, skipCache = false, totalScraped, totalPages = 0, cookies = '' } = req.body;
 
     if (!url || typeof url !== 'string' || url.trim() === '') {
       return res.status(400).json({
@@ -62,11 +61,25 @@ router.post('/analyze-direct', async (req, res) => {
       });
     }
 
-    if (!Array.isArray(reviews) || reviews.length === 0) {
+    if (!Array.isArray(reviews)) {
       return res.status(400).json({
         success: false,
         error: 'NO_REVIEWS',
-        message: 'reviews must be a non-empty array.',
+        message: 'reviews must be an array.',
+      });
+    }
+
+    const normalizedUrl = url.trim();
+    const { platform: detectedPlatform } = detectPlatform(normalizedUrl);
+    const productId = extractProductId(normalizedUrl, detectedPlatform);
+    const cacheKey = `${detectedPlatform}:${productId}`;
+    const supportsServerScrape = detectedPlatform === 'amazon' || detectedPlatform === 'flipkart' || detectedPlatform === 'reliancedigital';
+
+    if (reviews.length === 0 && !supportsServerScrape) {
+      return res.status(400).json({
+        success: false,
+        error: 'NO_REVIEWS',
+        message: 'No reviews received from client and server-side scraping is unavailable for this platform.',
       });
     }
 
@@ -99,12 +112,18 @@ router.post('/analyze-direct', async (req, res) => {
     // Scenario: cache was built when only 14 reviews reached the pipeline (old extension),
     // but now pagination delivers 800+ reviews — the old result is misleading.
     let effectiveSkipCache = Boolean(skipCache);
+    if (!effectiveSkipCache && reviews.length === 0 && supportsServerScrape) {
+      const cached = cacheService.getCache(cacheKey);
+      if (!cached) {
+        effectiveSkipCache = true;
+        console.log('[ReviewRoutes] No client reviews and no cache entry — forcing fresh server-side scrape (skip cache)');
+      } else {
+        console.log('[ReviewRoutes] No client reviews but cache exists — allowing cache lookup');
+      }
+    }
+
     if (!effectiveSkipCache) {
-      const { getCache } = require('../utils/cacheService');
-      const { detectPlatform, extractProductId } = require('../services/reviewOrchestrator');
-      const { platform: detectedPlatform } = detectPlatform(url.trim());
-      const productId = extractProductId(url.trim(), detectedPlatform);
-      const cached = getCache(`${detectedPlatform}:${productId}`);
+      const cached = cacheService.getCache(cacheKey);
       if (cached && cached.totalScraped && freshTotalScraped > cached.totalScraped * 2) {
         console.log(
           `[ReviewRoutes] Stale cache detected: cached.totalScraped=${cached.totalScraped}, ` +
@@ -114,9 +133,10 @@ router.post('/analyze-direct', async (req, res) => {
       }
     }
 
-    const result = await orchestrateAnalysis(url.trim(), reviews, {
+    const result = await orchestrateAnalysis(normalizedUrl, reviews, {
       skipCache: effectiveSkipCache,
       totalScraped: freshTotalScraped,
+      totalPages,
       cookies,
     });
 
@@ -124,9 +144,14 @@ router.post('/analyze-direct', async (req, res) => {
       return res.status(422).json(result);
     }
 
-    // Always surface the fresh scrape count in the response (even on cache hits the
-    // cached totalScraped may be stale — the user just scraped fresh data).
-    const finalResult = { ...result, totalScraped: freshTotalScraped };
+    // Surface the most reliable scraped count. Prefer backend orchestration output,
+    // then fallback to fresh client count when server-side totals are unavailable.
+    const finalResult = {
+      ...result,
+      totalScraped: Number.isFinite(result.totalScraped) && result.totalScraped > 0
+        ? result.totalScraped
+        : freshTotalScraped,
+    };
 
     console.log(`✅ RESPONSE SENT`);
     console.log(`   Reviews analyzed : ${finalResult.totalReviews}`);

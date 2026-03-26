@@ -2,6 +2,39 @@ import { getScopedElement, trimPrice } from '../utils/priceParser';
 import { extractImage } from '../utils/imageExtractor';
 import { RELIANCE_SELECTORS } from '../selectors/relianceSelectors';
 
+const RELIANCE_STOCK_SELECTORS = [
+    '.add-to-cart-container',
+    '.add-to-card-container',
+    '.buy-now-container',
+    'button[class*="add-to-cart"]',
+    'button[class*="buy-now"]',
+    '[data-testid*="add-to-cart"]',
+    '[data-testid*="buy-now"]',
+    '[class*="availability"]',
+    '[class*="stock"]'
+];
+
+const isRelianceUnavailable = (keywords) => {
+    const keywordRegex = new RegExp(keywords.map((k) => k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|'), 'i');
+
+    const scopedTexts = RELIANCE_STOCK_SELECTORS
+        .map((selector) => Array.from(document.querySelectorAll(selector)))
+        .flat()
+        .map((el) => (el?.innerText || '').trim())
+        .filter(Boolean);
+
+    if (scopedTexts.some((text) => keywordRegex.test(text))) {
+        return true;
+    }
+
+    const ctaText = (document.querySelector('button, [role="button"]')?.innerText || '').toLowerCase();
+    if (ctaText.includes('notify me') || ctaText.includes('coming soon')) {
+        return true;
+    }
+
+    return false;
+};
+
 /**
  * Extract brand and model from Reliance Digital product page.
  */
@@ -44,15 +77,8 @@ export const scrapeRelianceDigital = () => {
     const name = getScopedElement(containers, nameSelectors, 'name');
     const priceText = getScopedElement(containers, priceSelectors, 'price', true);
 
-    // Check availability
-    let available = true;
-    const bodyText = document.body.innerText.toLowerCase();
-    for (const keyword of unavailabilityKeywords) {
-        if (bodyText.includes(keyword)) {
-            available = false;
-            break;
-        }
-    }
+    // Check availability from product/CTA scope only.
+    const available = !isRelianceUnavailable(unavailabilityKeywords);
 
     const image = extractImage(imageSelectors);
 

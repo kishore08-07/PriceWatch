@@ -9,8 +9,27 @@
 const { searchAmazon } = require('./scrapers/amazonSearchScraper');
 const { searchFlipkart } = require('./scrapers/flipkartSearchScraper');
 const { searchRelianceDigital } = require('./scrapers/relianceSearchScraper');
-const { matchProduct } = require('./productMatcher');
+const { matchProduct, cosineSimilarity, fuzzyScore, brandMatch, stripVariants } = require('./productMatcher');
 const { generateCacheKey, setCache, getCache } = require('../utils/cacheService');
+
+// Marketing noise patterns that appear in product titles on Indian e-commerce sites.
+// Stripping these prevents polluted search queries like "Buy Samsung S24 Online India Amazon".
+const MARKETING_NOISE_PATTERN = /(?:\|.*$)|(?:[-–]\s*buy\s+online.*$)|(?:[-–]\s*shop\s+online.*$)|\b(?:buy\s+online|shop\s+online|best\s+price|lowest\s+price|free\s+delivery|free\s+shipping|cash\s+on\s+delivery|emi\s+available|bank\s+offer)\b/gi;
+
+/**
+ * Strip marketing noise from a raw product title.
+ * Removes pipe-separated suffixes and common Indian e-commerce marketing phrases
+ * that confuse search scrapers.
+ * @param {string} title
+ * @returns {string}
+ */
+function stripMarketingNoise(title) {
+    if (!title) return '';
+    return title
+        .replace(MARKETING_NOISE_PATTERN, '')
+        .replace(/\s{2,}/g, ' ')
+        .trim();
+}
 
 const COMPARISON_CACHE_TTL = 30 * 60 * 1000; // 30 minutes
 
@@ -22,6 +41,33 @@ const PLATFORM_SCRAPERS = {
 };
 
 const ALL_PLATFORMS = ['Amazon', 'Flipkart', 'Reliance Digital'];
+
+function getRelaxedMatch(sourceProduct, candidates) {
+    if (!Array.isArray(candidates) || candidates.length === 0) return null;
+
+    const sourceTitle = stripVariants(sourceProduct.title || '');
+    const sourceBrand = sourceProduct.brand || '';
+
+    const scored = candidates.map((candidate) => {
+        const candidateTitle = stripVariants(candidate.title || '');
+        const semantic = cosineSimilarity(sourceTitle, candidateTitle);
+        const fuzzy = fuzzyScore(sourceTitle, candidateTitle);
+        const brand = brandMatch(sourceBrand, candidate.title || '');
+        const score = (0.45 * semantic) + (0.35 * fuzzy) + (0.20 * brand);
+
+        return { ...candidate, _relaxedScore: score };
+    }).sort((a, b) => b._relaxedScore - a._relaxedScore);
+
+    const best = scored[0];
+    if (!best || best._relaxedScore < 0.28) return null;
+
+    const { _relaxedScore, ...result } = best;
+    return {
+        ...result,
+        matchConfidence: Math.max(result.matchConfidence || 0, Math.min(0.44, Math.round(_relaxedScore * 100) / 100)),
+        relaxedMatched: true,
+    };
+}
 
 /**
  * Build a search query from product info.
@@ -38,8 +84,13 @@ function buildSearchQuery(product) {
         parts.push(product.model);
     }
 
-    // Extract significant words from title (skip brand/model words already added)
-    if (product.title) {
+    // Strip marketing noise from title before extracting significant words.
+    // This handles titles like "Samsung Galaxy S24 | Buy Online India | Amazon"
+    // or "Apple iPhone 15 Pro — Best Price, Free Delivery".
+    const cleanTitle = stripMarketingNoise(product.title || '');
+
+    // Extract significant words from cleaned title (skip brand/model words already added)
+    if (cleanTitle) {
         const skipWords = new Set([
             ...(product.brand || '').toLowerCase().split(/\s+/),
             ...(product.model || '').toLowerCase().split(/\s+/),
@@ -48,7 +99,7 @@ function buildSearchQuery(product) {
             'free', 'shipping', 'delivery', '|', '-', '–', '—'
         ]);
 
-        const titleWords = product.title
+        const titleWords = cleanTitle
             .replace(/[()[\]|–—]/g, ' ')   // Remove brackets and special chars but keep content
             .replace(/[^\w\s]/g, ' ')       // Remove remaining punctuation
             .split(/\s+/)
@@ -62,6 +113,19 @@ function buildSearchQuery(product) {
     const query = parts.join(' ').replace(/\s+/g, ' ').trim();
     console.log(`[PriceComparison] Built search query: "${query}"`);
     return query;
+}
+
+function buildQueryVariants(product) {
+    const base = buildSearchQuery(product);
+    // Use cleaned title (not raw) to avoid passing marketing noise as a fallback query.
+    const cleanTitle = stripMarketingNoise(product.title || '').replace(/\s+/g, ' ').trim();
+    const brandModel = [product.brand, product.model].filter(Boolean).join(' ').trim();
+
+    const variants = [base, brandModel, cleanTitle]
+        .map((q) => (q || '').trim())
+        .filter((q) => q.length >= 3);
+
+    return [...new Set(variants)].slice(0, 3);
 }
 
 /**
@@ -83,7 +147,7 @@ function normalizePrice(price) {
  * @param {Object} sourceProduct - { title, brand, model }
  * @returns {Object} Result for this platform
  */
-async function searchAndMatch(platform, query, sourceProduct) {
+async function searchAndMatch(platform, queries, sourceProduct) {
     const scraper = PLATFORM_SCRAPERS[platform];
     if (!scraper) {
         return {
@@ -97,9 +161,25 @@ async function searchAndMatch(platform, query, sourceProduct) {
     }
 
     try {
-        const candidates = await scraper(query);
+        const candidateBuckets = await Promise.all(
+            queries.map((q) => scraper(q).catch(() => []))
+        );
+        const candidates = candidateBuckets
+            .flat()
+            .filter(Boolean)
+            .filter((c) => c.title && c.url);
 
-        if (!candidates || candidates.length === 0) {
+        const deduped = [];
+        const seen = new Set();
+        for (const c of candidates) {
+            const key = `${(c.url || '').split('?')[0]}::${(c.title || '').toLowerCase()}`;
+            if (!seen.has(key)) {
+                seen.add(key);
+                deduped.push(c);
+            }
+        }
+
+        if (deduped.length === 0) {
             return {
                 platform,
                 price: null,
@@ -110,7 +190,13 @@ async function searchAndMatch(platform, query, sourceProduct) {
             };
         }
 
-        const match = matchProduct(sourceProduct, candidates);
+        let match = matchProduct(sourceProduct, deduped);
+        if (!match) {
+            match = getRelaxedMatch(sourceProduct, deduped);
+            if (match) {
+                console.log(`[PriceComparison] ${platform}: used relaxed fallback match`);
+            }
+        }
 
         if (!match) {
             return {
@@ -161,27 +247,42 @@ async function compareProduct(product) {
     }
 
     // ── Check cache ─────────────────────────────────────────────────────
-    const cacheKey = generateCacheKey('comparison', `${sourcePlatform}:${title.substring(0, 50)}`);
+    // Key includes brand + model + first 80 chars of cleaned title to prevent
+    // cache collisions between products with identical short title prefixes
+    // (e.g. "Samsung Galaxy S24" vs "Samsung Galaxy S24+", or two colour variants).
+    const cleanTitleForKey = stripMarketingNoise(title).substring(0, 80).toLowerCase();
+    const cacheKey = generateCacheKey(
+        'comparison',
+        `${sourcePlatform}:${(brand || '').toLowerCase()}:${(model || '').toLowerCase()}:${cleanTitleForKey}`
+    );
     const cached = getCache(cacheKey);
 
     if (cached) {
-        console.log('[PriceComparison] Cache hit');
-        return { ...cached, fromCache: true };
+        const hasMissingPlatforms = Array.isArray(cached.results)
+            && cached.results.some((r) => !r.isCurrent && (r.availability === 'Not Found' || r.price == null));
+
+        if (!hasMissingPlatforms) {
+            console.log('[PriceComparison] Cache hit');
+            return { ...cached, fromCache: true };
+        }
+
+        console.log('[PriceComparison] Skipping stale/partial cache hit (missing platform data)');
     }
 
     // ── Build search query ──────────────────────────────────────────────
-    const query = buildSearchQuery(product);
+    const queryVariants = buildQueryVariants(product);
+    const query = queryVariants[0];
 
     // ── Determine target platforms ──────────────────────────────────────
     const targetPlatforms = ALL_PLATFORMS.filter(p => p !== sourcePlatform);
 
-    console.log(`[PriceComparison] Searching ${targetPlatforms.join(', ')} for "${query}"`);
+    console.log(`[PriceComparison] Searching ${targetPlatforms.join(', ')} with query variants: ${queryVariants.join(' | ')}`);
 
     // ── Scrape all target platforms in parallel ─────────────────────────
-    const sourceProduct = { title, brand: brand || '', model: model || '' };
+    const sourceProduct = { title, brand: brand || '', model: model || '', price: normalizePrice(price) };
 
     const searchPromises = targetPlatforms.map(platform =>
-        searchAndMatch(platform, query, sourceProduct)
+        searchAndMatch(platform, queryVariants, sourceProduct)
     );
 
     const otherResults = await Promise.all(searchPromises);

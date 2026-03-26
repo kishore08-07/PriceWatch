@@ -24,10 +24,13 @@ const { scrapeReviews } = require('./reviewScrapingService');
 
 // ── Limits & Timeouts ─────────────────────────────────────────────────────────
 const MAX_REVIEWS_PER_REQUEST = 2000;   // Hard cap on reviews sent to Python
+const MAX_ANALYSIS_REVIEWS = 450;       // Practical cap to keep AI latency low while preserving quality
 const MAX_REVIEW_TEXT_CHARS = 5000;     // Per-review text char limit
 const PIPELINE_TIMEOUT_MS = 5 * 60 * 1000; // 5 minute total pipeline timeout
 const DEFAULT_CACHE_TTL_MS = 6 * 60 * 60 * 1000; // 6 hours
-const SERVER_SCRAPE_THRESHOLD = 30;    // If extension sends < this, trigger server-side scraping
+// Platforms where the extension nearly always gets bot-blocked on pagination
+// pages beyond the first. For these, the backend is the AUTHORITATIVE source.
+const SERVER_PRIMARY_PLATFORMS = new Set(['amazon', 'flipkart', 'reliancedigital']);
 
 // ── Platform helpers ──────────────────────────────────────────────────────────
 
@@ -113,10 +116,6 @@ function validateAndSanitizeReviews(rawReviews) {
       return {
         text,
         rating: parseFloat(r.rating) || 3.0,
-        author: (r.author || 'Anonymous').substring(0, 100),
-        title: (r.title || '').substring(0, 500),
-        date: r.date || '',
-        helpfulCount: parseInt(r.helpfulCount, 10) || 0,
       };
     })
     .filter((r) => r.text.length >= 5);
@@ -166,7 +165,8 @@ function invalidateCache(url) {
  */
 async function orchestrateAnalysis(url, rawReviews, options = {}) {
   const { skipCache = false, cacheTtlMs = 6 * 60 * 60 * 1000, cookies = '' } = options;
-  let effectiveTotalScraped = options.totalScraped || rawReviews.length;
+  const safeRawReviews = Array.isArray(rawReviews) ? rawReviews : [];
+  let effectiveTotalScraped = options.totalScraped || safeRawReviews.length;
 
   const pipelineStart = Date.now();
 
@@ -187,38 +187,62 @@ async function orchestrateAnalysis(url, rawReviews, options = {}) {
   if (!skipCache) {
     const cached = cacheService.getCache(cacheKey);
     if (cached) {
+      const isStaleNoReviewSummary = /be\s+(the\s+)?first\s+one\s+to\s+review|be\s+the\s+first\s+to\s+review/i
+        .test(String(cached.summary || ''));
+      if (isStaleNoReviewSummary) {
+        console.log(`⚠️ [Orchestrator] Ignoring stale cached summary for ${cacheKey}`);
+      } else {
       const hitMs = Date.now() - pipelineStart;
       console.log(`⚡ [Orchestrator] Cache HIT — ${cacheKey} (${hitMs}ms)`);
       console.log(`   Cached: ${cached.totalReviews} analyzed / ${cached.totalScraped || '?'} scraped`);
       return { ...cached, fromCache: true, cacheHitTimeMs: hitMs };
+      }
     }
   }
 
   // ── 3. Validate + sanitise extension reviews ─────────────────────────────
-  const validationResult = validateAndSanitizeReviews(rawReviews);
+  const validationResult = validateAndSanitizeReviews(safeRawReviews);
   let sanitizedReviews = validationResult.valid ? validationResult.reviews : [];
 
-  const droppedBySanitize = rawReviews.length - sanitizedReviews.length;
+  const droppedBySanitize = safeRawReviews.length - sanitizedReviews.length;
+  const reportedClientPages = Number.isFinite(options.totalPages) ? options.totalPages : 0;
+
+  // For Amazon and Flipkart, ALWAYS run server-side scraping because:
+  //   1. Extension pagination is consistently bot-blocked after page 1
+  //   2. Server-side axios requests lack Sec-Fetch-* headers (no bot detection)
+  //   3. Extension reviews are still kept as a deduped supplement
+  // For Reliance Digital (SPA with JSON API), the extension typically scrapes
+  // single-page reviews accurately, so we only supplement when truly thin.
+  const clientCoverageRatio =
+    effectiveTotalScraped > 0 ? sanitizedReviews.length / effectiveTotalScraped : 1;
+  const shouldRunServerScraping =
+    SERVER_PRIMARY_PLATFORMS.has(platform) ||
+    sanitizedReviews.length === 0 ||
+    (sanitizedReviews.length < 30 && clientCoverageRatio < 0.6);
+
   console.log(`🧹 [Orchestrator] Step 1 — Sanitize`);
-  console.log(`   Input    : ${rawReviews.length} raw reviews from extension`);
+  console.log(`   Input    : ${safeRawReviews.length} raw reviews from extension`);
   console.log(`   Passed   : ${sanitizedReviews.length} reviews (≥ 5 chars, valid text)`);
   if (droppedBySanitize > 0)
     console.log(`   Dropped  : ${droppedBySanitize} (too short / non-string)`);
   console.log(`   Platform : ${platform}  |  Product: ${productId}`);
+  if (reportedClientPages > 0) {
+    console.log(`   Client pages reported: ${reportedClientPages}`);
+  }
 
-  // ── 3b. Server-side scraping supplement ────────────────────────────────────
-  //    If the extension couldn't paginate (blocked by Sec-Fetch headers),
-  //    the backend fetches review pages server-side using axios (no Sec-Fetch).
-  if (
-    sanitizedReviews.length < SERVER_SCRAPE_THRESHOLD &&
-    (platform === 'amazon' || platform === 'flipkart')
-  ) {
+  // ── 3b. Server-side scraping (primary for Amazon/Flipkart, supplement for others) ─
+  if (shouldRunServerScraping) {
     console.log(
-      `📡 [Orchestrator] Extension provided only ${sanitizedReviews.length} reviews (< ${SERVER_SCRAPE_THRESHOLD}) ` +
-      `— supplementing with server-side scraping…`
+      `📡 [Orchestrator] Server-side scraping ` +
+      `(platform=${platform}, client=${sanitizedReviews.length} reviews, coverage=${(clientCoverageRatio * 100).toFixed(1)}%)…`
     );
     try {
-      const scrapeResult = await scrapeReviews(url, platform, undefined, cookies);
+      const targetMaxPages = SERVER_PRIMARY_PLATFORMS.has(platform) ? 5 : 3;
+      const scrapeResult = await scrapeReviews(url, platform, targetMaxPages, cookies);
+
+      if (Number.isFinite(scrapeResult.totalFound) && scrapeResult.totalFound > 0) {
+        effectiveTotalScraped = scrapeResult.totalFound;
+      }
 
       if (scrapeResult.reviews.length > 0) {
         console.log(
@@ -230,8 +254,15 @@ async function orchestrateAnalysis(url, rawReviews, options = {}) {
         const serverValidation = validateAndSanitizeReviews(scrapeResult.reviews);
         const serverReviews = serverValidation.valid ? serverValidation.reviews : [];
 
-        // Merge extension + server reviews, deduplicate by text fingerprint
-        const merged = [...sanitizedReviews, ...serverReviews];
+        const shouldPreferServerOnly =
+          SERVER_PRIMARY_PLATFORMS.has(platform) &&
+          serverReviews.length >= 20;
+
+        // For supported platforms, server scraping is authoritative once we have
+        // enough reviews. Client-side reviews are only used as a thin-data supplement.
+        const merged = shouldPreferServerOnly
+          ? [...serverReviews]
+          : [...sanitizedReviews, ...serverReviews];
         const seen = new Set();
         sanitizedReviews = merged.filter((r) => {
           const fp = (r.text || '').toLowerCase().replace(/[^a-z0-9]/g, '').substring(0, 120);
@@ -240,7 +271,7 @@ async function orchestrateAnalysis(url, rawReviews, options = {}) {
           return true;
         });
 
-        effectiveTotalScraped = scrapeResult.totalFound || sanitizedReviews.length;
+        effectiveTotalScraped = scrapeResult.totalFound || Math.max(effectiveTotalScraped, sanitizedReviews.length);
 
         console.log(
           `📡 [Orchestrator] After merge + dedup: ${sanitizedReviews.length} unique reviews ` +
@@ -256,16 +287,36 @@ async function orchestrateAnalysis(url, rawReviews, options = {}) {
   // Bail if we still have no reviews after server-side attempt
   if (sanitizedReviews.length === 0) {
     return {
-      success: false,
-      error: 'No valid reviews found. The product may not have reviews, or scraping was blocked.',
+      success: true,
       platform,
       productId,
+      totalReviews: 0,
+      totalAnalyzed: 0,
+      totalScraped: effectiveTotalScraped || 0,
+      noReviewsFound: true,
+      sentimentScore: 0,
+      sentimentDistribution: {
+        positive: 0,
+        neutral: 0,
+        negative: 0,
+        total: 0,
+      },
+      pros: [],
+      cons: [],
+      summary: 'No reviews found for this product yet.',
+      preprocessingStats: null,
+      modelDetails: null,
+      processingTimeMs: 0,
+      pipelineTimeMs: Date.now() - pipelineStart,
+      fromCache: false,
+      analyzedAt: new Date().toISOString(),
     };
   }
 
   // ── 4. High-signal review extraction (process ALL reviews) ────────────────
+  const analysisTarget = Math.min(sanitizedReviews.length, MAX_ANALYSIS_REVIEWS);
   const highSignal = extractHighSignalReviews(sanitizedReviews, {
-    targetCount: sanitizedReviews.length,
+    targetCount: analysisTarget,
   });
   const reviewsForAnalysis =
     highSignal.length > 0 ? highSignal : sanitizedReviews;
@@ -273,6 +324,7 @@ async function orchestrateAnalysis(url, rawReviews, options = {}) {
   const droppedBySignal = sanitizedReviews.length - reviewsForAnalysis.length;
   console.log(`🎯 [Orchestrator] Step 2 — Signal scoring`);
   console.log(`   Scored   : ${reviewsForAnalysis.length} reviews`);
+  console.log(`   Target   : up to ${analysisTarget} high-signal reviews`);
   if (droppedBySignal > 0)
     console.log(`   Dropped  : ${droppedBySignal} (below quality threshold)`);
   console.log(`   Sending → Python AI service…`);

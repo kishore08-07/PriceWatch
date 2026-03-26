@@ -13,7 +13,6 @@ import PriceComparisonTable from './PriceComparisonTable';
  * Enhancements over v1:
  *  • Skeleton loading state with phase indicator & progress bar
  *  • Elapsed time counter while loading
- *  • Review count badges (totalReviews / totalAnalyzed)
  *  • Retry button with attempt counter
  *  • Refresh (re-analyse bypassing cache) action
  *  • Processing time in the result footer
@@ -217,8 +216,9 @@ const FeatureGrid = ({ product }) => {
                                             className="btn btn-sm btn-ghost"
                                             onClick={handleRefresh}
                                             title="Re-analyse (bypass cache)"
+                                            aria-label="Refresh"
                                         >
-                                            ↻ Refresh
+                                            <Icons.RefreshCw />
                                         </button>
                                         <button
                                             className="close-btn"
@@ -241,18 +241,6 @@ const FeatureGrid = ({ product }) => {
                                         </span>
                                     )}
 
-                                    {data.totalReviews != null && (
-                                        <span className="review-count-badge">
-                                            {data.totalReviews} reviews scraped
-                                        </span>
-                                    )}
-
-                                    {data.totalAnalyzed != null && data.totalAnalyzed !== data.totalReviews && (
-                                        <span className="review-count-badge analyzed">
-                                            {data.totalAnalyzed} analyzed
-                                        </span>
-                                    )}
-
                                     {fromCache && (
                                         <span className="cache-badge">Cached</span>
                                     )}
@@ -261,16 +249,13 @@ const FeatureGrid = ({ product }) => {
                                 <SentimentChart
                                     distribution={data.sentimentDistribution}
                                     score={data.sentimentScore}
-                                    totalAnalyzed={data.totalAnalyzed}
+                                    noReviewsFound={data.noReviewsFound}
                                 />
 
                                 <ReviewSummaryTable
                                     pros={data.pros}
                                     cons={data.cons}
                                     summary={data.summary}
-                                    totalReviews={data.totalReviews}
-                                    totalAnalyzed={data.totalAnalyzed}
-                                    preprocessingStats={data.preprocessingStats}
                                 />
 
                                 {/* Footer with timing */}

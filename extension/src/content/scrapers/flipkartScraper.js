@@ -64,6 +64,10 @@ function findProductNameFallback() {
 function getFlipkartPrice() {
     // Strategy 1: Try known visible price classes
     const knownSelectors = [
+        '.Nx9bqj.CxhGGd',      // New Flipkart PDP current-price class
+        '.Nx9bqj',             // New generic class fallback
+        '[data-testid*="final-price"]',
+        '[data-testid*="price"] [class*="Nx9"]',
         '._30jeq3._16Jk6d',  // Common product page price
         '._30jeq3',           // Alternative class
     ];
@@ -74,8 +78,8 @@ function getFlipkartPrice() {
             const text = el.innerText && el.innerText.trim();
             if (text && text.includes('₹')) {
                 const price = trimPrice(text);
-                // Reject values with < 4 digits (like 183)
-                if (price && price >= 1000) {
+                // Reject obviously invalid tiny values, but allow valid sub-1000 prices (e.g. ₹899)
+                if (price && price >= 50) {
                     return text;
                 }
             }
@@ -88,13 +92,13 @@ function getFlipkartPrice() {
         const text = reactContainer.innerText && reactContainer.innerText.trim();
         if (text && text.includes('₹')) {
             const price = trimPrice(text);
-            if (price && price >= 1000) {
+            if (price && price >= 50) {
                 return text;
             }
         }
     }
 
-    // Strategy 3: Scan all visible <div> and <span> elements
+    // Strategy 3: Scan visible <div>/<span> leaves and score candidates.
     const priceCandidates = [];
     const elements = document.querySelectorAll('div, span');
 
@@ -119,21 +123,41 @@ function getFlipkartPrice() {
         const style = window.getComputedStyle(el);
         if (style.textDecoration.includes('line-through')) continue;
 
-        // Exclude discount/offer text
-        if (/off|save|discount|%|\bMRP\b|\blist price\b|\bdeal\b/i.test(text)) continue;
+        // Exclude discount/offer text-only entries
+        if (/off|save|discount|%|\bMRP\b|\blist price\b|\bdeal\b/i.test(text) && !/^\s*₹\s*[\d,]+(?:\.\d+)?\s*$/.test(text)) continue;
 
         const price = trimPrice(text);
 
-        // Guard: reject values with < 4 digits
-        if (!price || price < 1000) continue;
+        // Guard: reject obviously invalid tiny values
+        if (!price || price < 50) continue;
 
-        // Get font size for comparison (real price is usually largest)
+        // Score candidate likelihood for "current selling price"
+        const className = (el.className || '').toString();
+        const parentClass = (el.parentElement?.className || '').toString();
+        const rect = el.getBoundingClientRect();
         const fontSize = parseFloat(style.fontSize);
+        let score = 0;
+
+        // Prefer known current-price class patterns
+        if (/Nx9bqj|_30jeq3|_16Jk6d/i.test(className)) score += 5;
+        if (/Nx9bqj|_30jeq3|_16Jk6d/i.test(parentClass)) score += 3;
+
+        // Prefer visually prominent text
+        if (!isNaN(fontSize)) score += Math.min(6, fontSize / 4);
+        if (style.fontWeight && parseInt(style.fontWeight, 10) >= 500) score += 2;
+
+        // Prefer content near main product section (top portion)
+        if (rect.top >= 0 && rect.top < window.innerHeight * 0.8) score += 2;
+
+        // Prefer price nodes near buy/add-to-cart controls
+        const isNearCta = el.closest('div, section')?.innerText?.match(/add to cart|buy now|buy at/i);
+        if (isNearCta) score += 2;
 
         priceCandidates.push({
             price,
             text,
             fontSize: isNaN(fontSize) ? 0 : fontSize,
+            score,
             el
         });
     }
@@ -142,8 +166,13 @@ function getFlipkartPrice() {
         return null; // No valid price found
     }
 
-    // Pick the element with largest font-size (current price is visually prominent)
-    priceCandidates.sort((a, b) => b.fontSize - a.fontSize);
+    // Pick the highest-scoring candidate; tie-break on larger font and lower price
+    // (lower usually represents discounted current price vs MRP on Flipkart PDP).
+    priceCandidates.sort((a, b) => {
+        if (b.score !== a.score) return b.score - a.score;
+        if (b.fontSize !== a.fontSize) return b.fontSize - a.fontSize;
+        return a.price - b.price;
+    });
 
     return priceCandidates[0].text;
 }

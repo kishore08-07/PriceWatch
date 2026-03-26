@@ -249,11 +249,7 @@ async function handleAiInsightsRequest(request, sendResponse) {
         }
 
         if (!reviews || reviews.length === 0) {
-            sendResponse({
-                success: false,
-                error: 'No reviews found on this page. The product may not have any reviews yet, or the page hasn\'t fully loaded. Please scroll to the reviews section and try again.',
-            });
-            return;
+            console.warn('[PriceWatch] No client-side reviews found. Proceeding with backend server-side scraping fallback.');
         }
 
         // ── Step 2b: Extract browser cookies for server-side scraping ───────
@@ -278,7 +274,7 @@ async function handleAiInsightsRequest(request, sendResponse) {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
                 url: effectiveUrl,
-                reviews,
+                reviews: reviews || [],
                 skipCache,
                 platform: contentPlatform,
                 totalPages: contentTotalPages,

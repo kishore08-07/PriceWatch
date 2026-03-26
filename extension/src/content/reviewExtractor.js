@@ -39,6 +39,69 @@ const safeText = (el) => {
   }
 };
 
+/** Remove reviewer/profile metadata fragments from extracted review text. */
+const sanitizeReviewText = (rawText) => {
+  if (!rawText || typeof rawText !== 'string') return '';
+
+  const noReviewPatterns = [
+    /be\s+(the\s+)?first\s+one\s+to\s+review/i,
+    /be\s+the\s+first\s+to\s+review/i,
+    /no\s+reviews?\s+(yet|available|found)/i,
+    /write\s+(a\s+)?review/i,
+    /start\s+the\s+conversation/i,
+  ];
+
+  if (noReviewPatterns.some((pattern) => pattern.test(rawText))) {
+    return '';
+  }
+
+  const metadataLinePatterns = [
+    /verified\s+purchase/i,
+    /certified\s+buyer/i,
+    /\b\d+\s*(day|days|month|months|year|years)\s+ago\b/i,
+    /\bbought\b.*\bago\b/i,
+    /^([A-Z][a-z]+\s*){1,4}$/,
+    /district\s*\d*/i,
+    /^\s*Helpful\s*$/i,
+    /^\s*Report\s*$/i,
+    /^\s*\d+\s+people?\s+found\s+this\s+helpful\s*$/i,
+  ];
+
+  const lines = rawText
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .filter((line) => !metadataLinePatterns.some((pattern) => pattern.test(line)));
+
+  let text = lines.join(' ');
+
+  text = text
+    .replace(/\bverified\s+purchase\b/gi, ' ')
+    .replace(/\bcertified\s+buyer\b/gi, ' ')
+    .replace(/\b\d+\s*(day|days|month|months|year|years)\s+ago\b/gi, ' ')
+    .replace(/\bbought\b[^.]{0,120}?\bago\b/gi, ' ')
+    .replace(/\b\d[\d,]*\s+(?:global\s+)?(?:customer\s+)?(?:ratings?|reviews?)(?:\s+and\s+\d[\d,]*\s+(?:ratings?|reviews?))?\b/gi, ' ')
+    .replace(/\bshowing\s+\d+[\-–]\d+\s+of\s+\d+\b/gi, ' ')
+    .replace(/\ball\s+\d[\d,]*\s+reviews?\b/gi, ' ')
+    // Star rating text ("5.0 out of 5 stars")
+    .replace(/\b\d+(?:\.\d+)?\s*out\s+of\s*\d+\s*stars?\b/gi, ' ')
+    // "Reviewed in [Country] on [Date]"
+    .replace(/\breviewed\s+in\s+[A-Za-z]+(?:\s+on\s+[A-Za-z]+\s+\d{1,2},?\s*\d{2,4})?/gi, ' ')
+    // "X people found this helpful"
+    .replace(/\b\d+\s+(?:people|person|customer)s?\s+found\s+this\s+(?:helpful|useful)/gi, ' ')
+    // Standalone "Helpful" / "Report"
+    .replace(/\bHelpful\b/g, ' ')
+    .replace(/\bReport\b(?=[.\s]|$)/g, ' ')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+
+  if (noReviewPatterns.some((pattern) => pattern.test(text))) {
+    return '';
+  }
+
+  return text;
+};
+
 /** Query first match across multiple selectors. */
 const qsFirst = (root, selectors) => {
   for (const s of selectors) {
@@ -151,32 +214,44 @@ function isBotBlockedPage(html) {
  * @returns {Promise<string|null>} HTML string, or null on total failure
  */
 async function fetchPage(url) {
-  const FETCH_TIMEOUT_MS = 8000; // 8-second timeout per strategy
+  const FETCH_TIMEOUT_MS = 10000; // 10-second timeout per strategy
 
-  // Strategy 1: Direct fetch from content script (with timeout)
-  try {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
-    const resp = await fetch(url, {
-      credentials: 'include',
-      headers: {
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-      },
-      signal: controller.signal,
-    });
-    clearTimeout(timer);
-    if (resp.ok) {
-      const html = await resp.text();
-      if (!isBotBlockedPage(html)) return html;
-      console.warn('[fetchPage] Direct fetch returned bot/CAPTCHA page — trying MAIN-world fetch');
-    } else {
-      console.warn(`[fetchPage] Direct fetch HTTP ${resp.status} for ${url.substring(0, 80)}`);
+  // For Amazon and Flipkart review pages, skip the direct content-script fetch
+  // entirely. Direct fetch() sends Sec-Fetch-Mode: cors and Sec-Fetch-Site:
+  // cross-site which Amazon/Flipkart bot detection picks up immediately.
+  // Go straight to MAIN-world fetch (runs inside the page's own JS context).
+  const isStrictPlatformReviewPage =
+    /\/(product-reviews|ratings-reviews)\//i.test(url) &&
+    /amazon\.|flipkart\.com/i.test(url);
+
+  if (!isStrictPlatformReviewPage) {
+    // Strategy 1: Direct fetch from content script (fast, works on many sites)
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+      const resp = await fetch(url, {
+        credentials: 'include',
+        headers: {
+          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        },
+        signal: controller.signal,
+      });
+      clearTimeout(timer);
+      if (resp.ok) {
+        const html = await resp.text();
+        if (!isBotBlockedPage(html)) return html;
+        console.warn('[fetchPage] Direct fetch returned bot/CAPTCHA page — trying MAIN-world fetch');
+      } else {
+        console.warn(`[fetchPage] Direct fetch HTTP ${resp.status} for ${url.substring(0, 80)}`);
+      }
+    } catch (e) {
+      console.warn('[fetchPage] Direct fetch failed:', e.message);
     }
-  } catch (e) {
-    console.warn('[fetchPage] Direct fetch failed:', e.message);
+  } else {
+    console.log('[fetchPage] Strict platform review page — skipping direct fetch, using MAIN-world directly');
   }
 
-  // Strategy 2: Background MAIN-world fetch with timeout
+  // Strategy 2: Background MAIN-world fetch (runs as page's own JS — no Sec-Fetch headers)
   try {
     const result = await Promise.race([
       chrome.runtime.sendMessage({ action: 'FETCH_PAGE', url }),
@@ -191,6 +266,7 @@ async function fetchPage(url) {
 
   return null;
 }
+
 
 // ─── Amazon ──────────────────────────────────────────────────────────────────
 
@@ -671,7 +747,7 @@ function parseFlipkartCard(container) {
   }
 
   const bodyEl = qsFirst(container, FLIPKART_REVIEW_BODY);
-  let text = safeText(bodyEl);
+  let text = sanitizeReviewText(safeText(bodyEl));
 
   const titleEl = container.querySelector(
     'p[class*="_2-N8zT"], p[class*="title"], b, [class*="reviewTitle"]'
@@ -679,7 +755,7 @@ function parseFlipkartCard(container) {
   const title = safeText(titleEl);
 
   if (text.length < 15 && title.length > 2) {
-    text = title + (text ? '. ' + text : '');
+    text = sanitizeReviewText(title + (text ? '. ' + text : ''));
   }
 
   if (!text || text.length < 5) return null;
@@ -862,6 +938,10 @@ async function fetchFlipkartPaginatedReviews(maxPages = 50) {
     const PAGINATION_TIMEOUT_MS = 30_000;
     const paginationStart = Date.now();
     let consecutiveEmpty = 0;
+    // Loop detection: Flipkart silently returns page 1 HTML when pagination
+    // overshoots the last real page (e.g., page=51 returns page=1 content).
+    // Fingerprint page 1 and stop if a later page has the same fingerprint.
+    let page1Fingerprint = null;
 
     for (let page = 1; page <= maxPages; page++) {
       if (Date.now() - paginationStart > PAGINATION_TIMEOUT_MS) {
@@ -883,6 +963,28 @@ async function fetchFlipkartPaginatedReviews(maxPages = 50) {
 
         consecutiveFailures = 0;
         const doc = new DOMParser().parseFromString(html, 'text/html');
+
+        // Loop detection: fingerprint = first 3 review title strings joined.
+        // Primary: look for review titles by class. Fallback: use review body
+        // text snippets (DOM-class-independent) to handle Flipkart SSR variants.
+        let fpElements = Array.from(
+          doc.querySelectorAll('[class*="review"] [class*="title"], [class*="_3LYOAd"], [class*="review-title"]')
+        ).slice(0, 3);
+        // Fallback: use any substantial text block as fingerprint source
+        if (fpElements.length === 0) {
+          fpElements = Array.from(
+            doc.querySelectorAll('[class*="review"] p, [class*="review"] div, [class*="Review"] p')
+          ).filter(el => (el.textContent || '').trim().length > 20).slice(0, 3);
+        }
+        const fpStr = fpElements.map(el => (el.textContent || '').trim().substring(0, 60)).join('|');
+        if (fpStr) {
+          if (page === 1) {
+            page1Fingerprint = fpStr;
+          } else if (page1Fingerprint && fpStr === page1Fingerprint) {
+            console.log(`[ReviewExtractor:Flipkart] Page ${page} matches page 1 — loop detected, stopping`);
+            break;
+          }
+        }
 
         const pageReviews = [];
         const containers = qsAll(doc, FLIPKART_REVIEW_CONTAINERS);
@@ -1037,8 +1139,8 @@ function extractRelianceReviews() {
   for (const container of containers) {
     try {
       const bodyEl = qsFirst(container, RELIANCE_REVIEW_BODY);
-      let text = safeText(bodyEl);
-      if (!text || text.length < 10) text = safeText(container);
+      let text = sanitizeReviewText(safeText(bodyEl));
+      if (!text || text.length < 10) text = sanitizeReviewText(safeText(container));
       if (!text || text.length < 5) continue;
 
       let rating = 0;
@@ -1303,9 +1405,13 @@ export const getRealReviews = async () => {
     }
 
     // Step 5: Deduplicate — NO artificial cap
+    const normalizedReviews = reviews
+      .map((r) => ({ ...r, text: sanitizeReviewText(r.text) }))
+      .filter((r) => r.text && r.text.length >= 5);
+
     const seen = new Set();
     const unique = [];
-    for (const r of reviews) {
+    for (const r of normalizedReviews) {
       const fp = fingerprint(r.text);
       if (fp.length < 5) continue;
       if (seen.has(fp)) continue;

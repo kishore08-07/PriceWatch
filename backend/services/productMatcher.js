@@ -16,6 +16,8 @@ const NOISE_WORDS = new Set([
 const VARIANT_PATTERN = /\b(\d+\s*gb|\d+\s*tb|\d+\s*mb|\d+\s*ram|\d+\s*rom|\d+\s*storage)\b/gi;
 const COLOR_PATTERN = /\b(black|white|silver|gold|blue|red|green|grey|gray|pink|purple|titanium|midnight|starlight|graphite|phantom|cosmic|mystic|onyx|ivory|cream|bronze|copper|coral|lavender|mint|sage|yellow|orange)\b/gi;
 const PARENTHETICAL = /\([^)]*\)/g;
+const MODEL_TOKEN_PATTERN = /\b[a-z]*\d+[a-z\d-]*\b/gi;
+const STORAGE_NUMERIC_TOKENS = new Set(['8', '16', '32', '64', '128', '256', '512', '1024', '2048']);
 
 /**
  * Normalize a product title for comparison.
@@ -140,6 +142,55 @@ function cosineSimilarity(a, b) {
     return magnitude === 0 ? 0 : dotProduct / magnitude;
 }
 
+/**
+ * Build TF-IDF vectors for a small local corpus and compute cosine similarity.
+ */
+function tfidfCosineSimilarity(sourceText, candidateText, corpus = []) {
+    const docs = [sourceText, candidateText, ...corpus].map((d) => tokenize(d));
+    if (docs[0].length === 0 || docs[1].length === 0) return 0;
+
+    const termDocFreq = {};
+    for (const tokens of docs) {
+        const uniq = new Set(tokens);
+        for (const token of uniq) {
+            termDocFreq[token] = (termDocFreq[token] || 0) + 1;
+        }
+    }
+
+    const docCount = docs.length;
+    const idf = {};
+    for (const term of Object.keys(termDocFreq)) {
+        idf[term] = Math.log((docCount + 1) / (termDocFreq[term] + 1)) + 1;
+    }
+
+    const vectorize = (tokens) => {
+        const tf = termFrequency(tokens);
+        const vec = {};
+        for (const term of Object.keys(tf)) {
+            vec[term] = tf[term] * (idf[term] || 0);
+        }
+        return vec;
+    };
+
+    const a = vectorize(docs[0]);
+    const b = vectorize(docs[1]);
+    const allTerms = new Set([...Object.keys(a), ...Object.keys(b)]);
+
+    let dot = 0;
+    let magA = 0;
+    let magB = 0;
+    for (const term of allTerms) {
+        const va = a[term] || 0;
+        const vb = b[term] || 0;
+        dot += va * vb;
+        magA += va * va;
+        magB += vb * vb;
+    }
+
+    const mag = Math.sqrt(magA) * Math.sqrt(magB);
+    return mag === 0 ? 0 : dot / mag;
+}
+
 // ── Fuzzy Score ─────────────────────────────────────────────────────────
 
 /**
@@ -259,7 +310,10 @@ function extractStorage(text) {
         const [, num, unit] = m.match(/(\d+)\s*(gb|tb)/i);
         const val = parseInt(num, 10);
         return unit.toLowerCase() === 'tb' ? val * 1024 : val;
-    }).filter(v => v >= 16); // Filter out RAM-sized values below 16GB as likely RAM not storage
+    // Filter out values below 32 GB — 16 GB is a common RAM size and causes
+    // false storage mismatches. Legitimate storage starts at 32 GB for most
+    // consumer electronics (phones, laptops, tablets, pendrives).
+    }).filter(v => v >= 32);
 }
 
 /**
@@ -286,9 +340,55 @@ function storageMatch(sourceTitle, candidateTitle) {
     return 0;
 }
 
+function extractModelTokens(text) {
+    if (!text) return [];
+    const matches = normalizeTitle(text).match(MODEL_TOKEN_PATTERN) || [];
+    return matches
+        .map((m) => m.replace(/[^a-z0-9]/gi, ''))
+    .filter((m) => /\d/.test(m) && m.length >= 2)
+        .filter((m) => !/^\d+(gb|tb|mb|ram|rom|storage)$/i.test(m))
+    .filter((m) => !( /^\d+$/.test(m) && STORAGE_NUMERIC_TOKENS.has(m) ));
+}
+
+function modelTokenConsistency(sourceTitle, sourceModel, candidateTitle) {
+    const srcTokens = new Set([
+        ...extractModelTokens(sourceTitle),
+        ...extractModelTokens(sourceModel || ''),
+    ]);
+    const candTokens = new Set(extractModelTokens(candidateTitle));
+
+    if (srcTokens.size === 0 || candTokens.size === 0) return 0.5;
+
+    let overlap = 0;
+    for (const t of srcTokens) {
+        if (candTokens.has(t)) overlap++;
+    }
+
+    if (overlap > 0) return 1;
+
+    // Both sides have model tokens but none overlap → wrong variant/model.
+    // Use 0.1 instead of 0 to avoid catastrophically capping confidence for
+    // products with phrase-only names (e.g. "AirPods Pro", "Galaxy Buds") where
+    // model token extraction produces no tokens on one or both sides at inference
+    // time, but the mismatch is genuine here (both have tokens, none match).
+    return 0.1;
+}
+
+function pricePlausibility(sourcePrice, candidatePrice) {
+    if (!sourcePrice || !candidatePrice) return 0.5;
+    if (sourcePrice <= 0 || candidatePrice <= 0) return 0.5;
+    const ratio = candidatePrice / sourcePrice;
+    if (ratio >= 0.55 && ratio <= 1.8) return 1;
+    if (ratio >= 0.4 && ratio <= 2.3) return 0.6;
+    return 0.1;
+}
+
 // ── Main Matching Function ──────────────────────────────────────────────
 
-const CONFIDENCE_THRESHOLD = 0.35;
+// Raised from 0.35 → 0.45: the old threshold was too permissive and allowed
+// products sharing only a brand name or a storage size to be treated as matches.
+// 0.45 requires at least moderate title similarity AND model/brand agreement.
+const CONFIDENCE_THRESHOLD = 0.45;
 
 /**
  * Match a source product against a list of candidates.
@@ -300,35 +400,54 @@ const CONFIDENCE_THRESHOLD = 0.35;
 function matchProduct(sourceProduct, candidates) {
     if (!candidates || candidates.length === 0) return null;
 
-    const { title: sourceTitle, brand: sourceBrand, model: sourceModel } = sourceProduct;
+    const { title: sourceTitle, brand: sourceBrand, model: sourceModel, price: sourcePrice } = sourceProduct;
     const strippedSource = stripVariants(sourceTitle);
+    const localCorpus = candidates.map((c) => stripVariants(c.title || '')).filter(Boolean);
 
     const scored = candidates.map(candidate => {
         const strippedCandidate = stripVariants(candidate.title);
 
         // Weighted composite score
         const titleCosine = cosineSimilarity(strippedSource, strippedCandidate);
+        const tfidfCosine = tfidfCosineSimilarity(strippedSource, strippedCandidate, localCorpus);
         const modelScore = modelMatch(sourceModel, candidate.title);
         const brandScore = brandMatch(sourceBrand, candidate.title);
         const fuzzy = fuzzyScore(strippedSource, strippedCandidate);
         const storage = storageMatch(sourceTitle, candidate.title);
+        const modelTokenScore = modelTokenConsistency(sourceTitle, sourceModel, candidate.title);
+        const priceScore = pricePlausibility(sourcePrice, candidate.price);
 
         let confidence =
-            0.35 * titleCosine +
-            0.25 * modelScore +
-            0.15 * brandScore +
-            0.10 * fuzzy +
-            0.15 * storage;
+            0.20 * titleCosine +
+            0.22 * tfidfCosine +
+            0.20 * modelScore +
+            0.10 * brandScore +
+            0.08 * fuzzy +
+            0.10 * storage +
+            0.05 * modelTokenScore +
+            0.05 * priceScore;
 
         // Hard penalty: if storage is explicitly mismatched, cap confidence
         if (storage === 0) {
             confidence = Math.min(confidence, 0.30);
         }
 
+        // Soft penalty: model tokens present on both sides but none overlap — likely
+        // a different variant (e.g. S24 vs S24+). We still allow a generous cap of
+        // 0.35 so that very-high-similarity titles (same brand, similar name) can
+        // survive, but the explicit mismatch prevents a high overall confidence.
+        if (modelTokenScore === 0.1) {
+            confidence = Math.min(confidence, 0.35);
+        }
+
+        if ((candidate.availability || '').toLowerCase().includes('out of stock')) {
+            confidence *= 0.97;
+        }
+
         return {
             ...candidate,
             matchConfidence: Math.round(confidence * 100) / 100,
-            _scores: { titleCosine, modelScore, brandScore, fuzzy, storage }
+            _scores: { titleCosine, tfidfCosine, modelScore, brandScore, fuzzy, storage, modelTokenScore, priceScore }
         };
     });
 
@@ -355,6 +474,7 @@ module.exports = {
     modelMatch,
     brandMatch,
     storageMatch,
+    tfidfCosineSimilarity,
     extractStorage,
     matchProduct,
     normalizeTitle,

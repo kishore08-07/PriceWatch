@@ -13,7 +13,11 @@ protobuf==5.29.2       # Required by sentencepiece
 
 # Text preprocessing
 emoji==2.14.0          # Emoji → text conversion
-langdetect==1.0.9      # Language detection for mixed-language reviews
+langdetect==1.0.9      # Language detection — filters non-English reviews before DistilBERT
+
+# Keyphrase extraction (Phase 3 — dynamic pros/cons)
+keybert==0.8.5         # KeyBERT: semantic keyphrase extraction from review text
+scikit-learn>=1.4.0    # TF-IDF (used by KeyBERT internally + for extractive pre-selection)
 
 # Validation
 pydantic==2.10.3

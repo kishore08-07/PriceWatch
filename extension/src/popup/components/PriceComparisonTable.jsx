@@ -19,6 +19,19 @@ const formatPrice = (price) => {
     return `₹${price.toLocaleString('en-IN')}`;
 };
 
+const getPriceDeltaLabel = (candidatePrice, currentPrice) => {
+    if (candidatePrice == null || currentPrice == null || currentPrice <= 0) return null;
+    if (candidatePrice === currentPrice) {
+        return { text: 'Same price', kind: 'same' };
+    }
+
+    const deltaPct = Math.round((Math.abs(candidatePrice - currentPrice) / currentPrice) * 100);
+    if (candidatePrice < currentPrice) {
+        return { text: `${deltaPct}% cheaper`, kind: 'cheaper' };
+    }
+    return { text: `${deltaPct}% higher`, kind: 'higher' };
+};
+
 const PriceComparisonTable = ({
     data,
     loading,
@@ -29,6 +42,8 @@ const PriceComparisonTable = ({
     onClose
 }) => {
     const results = data?.results || [];
+    const currentResult = results.find(r => r.isCurrent);
+    const currentPrice = currentResult?.price ?? null;
 
     // Find cheapest price (excluding null prices and the current platform)
     const validPrices = results.filter(r => r.price != null);
@@ -134,6 +149,9 @@ const PriceComparisonTable = ({
                                             item.availability === 'Not Found' ||
                                             item.availability === 'Error';
                                         const hasError = item.error && !item.price;
+                                        const delta = !item.isCurrent
+                                            ? getPriceDeltaLabel(item.price, currentPrice)
+                                            : null;
 
                                         return (
                                             <tr
@@ -148,9 +166,9 @@ const PriceComparisonTable = ({
                                                     {item.isCurrent && (
                                                         <span className="current-badge">Current</span>
                                                     )}
-                                                    {item.matchConfidence != null && !item.isCurrent && item.price != null && (
-                                                        <span className={`confidence-badge ${item.matchConfidence >= 0.7 ? 'high' : item.matchConfidence >= 0.5 ? 'medium' : 'low'}`}>
-                                                            {Math.round(item.matchConfidence * 100)}%
+                                                    {delta && (
+                                                        <span className={`price-delta-badge ${delta.kind}`}>
+                                                            {delta.text}
                                                         </span>
                                                     )}
                                                 </td>
@@ -192,8 +210,6 @@ const PriceComparisonTable = ({
                         {validPrices.length >= 2 && (
                             <div className="savings-summary">
                                 {(() => {
-                                    const currentResult = results.find(r => r.isCurrent);
-                                    const currentPrice = currentResult?.price;
                                     if (currentPrice && cheapestPrice && cheapestPrice < currentPrice) {
                                         const savings = currentPrice - cheapestPrice;
                                         const cheapestPlatform = results.find(r => r.price === cheapestPrice)?.platform;
