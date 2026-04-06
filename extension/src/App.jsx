@@ -197,18 +197,22 @@ function App() {
         <FeatureGrid product={product} />
         
         {/* WhatsApp Settings Section */}
-        {user && !isWhatsAppVerified && (
+        {user && (
           <div className="whatsapp-section">
             {!showWhatsAppSettings && (
               <button
                 className="btn btn-whatsapp-cta w-full"
                 onClick={() => {
                   setShowWhatsAppSettings(true);
-                  startVerification();
+                  if (!isWhatsAppVerified) {
+                    startVerification();
+                  } else {
+                    fetchWhatsAppStatus();
+                  }
                 }}
               >
                 <span>📱</span>
-                <span>Enable WhatsApp Alerts</span>
+                <span>{isWhatsAppVerified ? 'Manage WhatsApp Alerts' : 'Enable WhatsApp Alerts'}</span>
               </button>
             )}
 

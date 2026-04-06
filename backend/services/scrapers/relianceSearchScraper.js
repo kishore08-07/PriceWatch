@@ -13,21 +13,108 @@
 
 'use strict';
 
+const axios = require('axios');
 const { withBrowser } = require('../../utils/browserPool');
 
 const HOME_URL = 'https://www.reliancedigital.in';
 const MAX_RESULTS = 15;
-const PAGE_TIMEOUT = 25000;
+const PAGE_TIMEOUT = 18000;
 
-const randomDelay = (min = 1000, max = 2500) =>
+const randomDelay = (min = 250, max = 700) =>
     new Promise(resolve => setTimeout(resolve, min + Math.random() * (max - min)));
+
+function toAbsoluteRelianceUrl(pathOrUrl) {
+    if (!pathOrUrl) return '';
+    if (/^https?:\/\//i.test(pathOrUrl)) return pathOrUrl;
+    const normalized = String(pathOrUrl).startsWith('/') ? pathOrUrl : `/${pathOrUrl}`;
+    return `${HOME_URL}${normalized}`;
+}
+
+function normalizePriceValue(value) {
+    if (value === null || value === undefined) return null;
+    if (typeof value === 'number') return value;
+    const parsed = parseInt(String(value).replace(/[^\d]/g, ''), 10);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+}
+
+function mapCatalogItemToResult(item) {
+    const title = (item?.name || item?.attributes?.description || '').trim();
+    if (!title) return null;
+
+    const slug = item?.slug || item?.action?.page?.params?.slug?.[0] || '';
+    const url = toAbsoluteRelianceUrl(item?.action?.page?.url || (slug ? `/product/${slug}` : ''));
+    if (!url || !/\/(?:product|p)\//i.test(url)) return null;
+
+    const effectivePrice = normalizePriceValue(item?.price?.effective?.min);
+    const markedPrice = normalizePriceValue(item?.price?.marked?.min);
+    const price = effectivePrice || markedPrice || null;
+    const sellable = item?.sellable;
+
+    return {
+        title: title.substring(0, 200),
+        price,
+        url: url.split('?')[0],
+        availability: sellable === false ? 'Out of Stock' : 'In Stock',
+        rating: normalizePriceValue(item?.rating?.value) || null,
+        platform: 'Reliance Digital',
+    };
+}
+
+async function searchRelianceViaCatalogApi(query) {
+    const endpoint = `${HOME_URL}/ext/raven-api/catalog/v1.0/products`;
+    const response = await axios.get(endpoint, {
+        params: {
+            q: query,
+            f: 'page_type:number',
+            page_id: '*',
+            page_no: 1,
+            page_size: 12,
+            page_type: 'number',
+        },
+        timeout: 12000,
+        headers: {
+            'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+            'Accept': 'application/json, text/plain, */*',
+            'Referer': `${HOME_URL}/products?q=${encodeURIComponent(query)}`,
+            'Origin': HOME_URL,
+        },
+        validateStatus: (s) => s >= 200 && s < 500,
+    });
+
+    if (response.status !== 200) return [];
+    const items = Array.isArray(response.data?.items) ? response.data.items : [];
+    const mapped = items
+        .map(mapCatalogItemToResult)
+        .filter(Boolean)
+        .slice(0, MAX_RESULTS);
+
+    return mapped;
+}
 
 /**
  * Search Reliance Digital for a product query and return structured results.
  * @param {string} query - Search query
  * @returns {Promise<Array>} Array of product candidates
  */
-async function searchRelianceDigital(query) {
+async function searchRelianceDigital(query, options = {}) {
+    const { browserFallback = false } = options;
+
+    // Fast path: Reliance catalog API is significantly faster and more stable than UI scraping.
+    try {
+        const apiResults = await searchRelianceViaCatalogApi(query);
+        if (apiResults.length > 0) {
+            console.log(`[RelianceScraper] API found ${apiResults.length} results for "${query}"`);
+            return apiResults;
+        }
+    } catch (err) {
+        console.warn(`[RelianceScraper] API search failed for "${query}": ${err.message}`);
+    }
+
+    if (!browserFallback) {
+        return [];
+    }
+
+    // Fallback path: browser scraping.
     return withBrowser(async (browser) => {
         let page = null;
         try {
@@ -44,7 +131,7 @@ async function searchRelianceDigital(query) {
 
             console.log(`[RelianceScraper] Navigating to homepage…`);
             await page.goto(HOME_URL, {
-                waitUntil: 'networkidle2',
+                waitUntil: 'domcontentloaded',
                 timeout: PAGE_TIMEOUT,
             });
 
@@ -71,18 +158,18 @@ async function searchRelianceDigital(query) {
             await page.keyboard.press('Enter');
             console.log(`[RelianceScraper] Search submitted, waiting for results…`);
 
-            await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 15000 }).catch(() => {
+            await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 12000 }).catch(() => {
                 console.warn('[RelianceScraper] Navigation timeout — trying to parse current page');
             });
 
             await page.waitForFunction(
-                () => document.querySelectorAll('a[href*="/p/"]').length > 0,
-                { timeout: 10000 }
+                () => document.querySelectorAll('a[href*="/product/"], a[href*="/p/"]').length > 0,
+                { timeout: 7000 }
             ).catch(() => {
                 console.warn('[RelianceScraper] Result links not detected within timeout');
             });
 
-            await randomDelay(1500, 2500);
+            await randomDelay();
 
             const finalUrl = page.url();
             console.log(`[RelianceScraper] Current URL: ${finalUrl}`);
@@ -92,13 +179,14 @@ async function searchRelianceDigital(query) {
                 const seenUrls = new Set();
 
                 // Strategy 1: Find all links that point to product pages
-                const allLinks = document.querySelectorAll('a[href*="/p/"]');
+                const allLinks = document.querySelectorAll('a[href*="/product/"], a[href*="/p/"]');
 
                 for (const link of allLinks) {
                     if (items.length >= maxResults) break;
 
                     let url = link.href || '';
                     if (!url) continue;
+                    if (!/\/(?:product|p)\//i.test(url)) continue;
 
                     const cleanUrl = url.split('?')[0];
                     if (seenUrls.has(cleanUrl)) continue;
@@ -125,9 +213,9 @@ async function searchRelianceDigital(query) {
                     let container = link.parentElement;
                     for (let i = 0; i < 5 && container; i++) {
                         const text = container.innerText || '';
-                        const priceMatch = text.match(/₹\s*([\d,]+)/);
+                        const priceMatch = text.match(/₹\s*([\d,.]+)/);
                         if (priceMatch) {
-                            const parsed = parseInt(priceMatch[1].replace(/,/g, ''), 10);
+                            const parsed = parseInt(priceMatch[1].replace(/[^\d]/g, ''), 10);
                             if (parsed && parsed >= 100) { price = parsed; break; }
                         }
                         container = container.parentElement;
@@ -152,19 +240,20 @@ async function searchRelianceDigital(query) {
 
                 // Strategy 2: product cards fallback
                 if (items.length === 0) {
-                    const cards = document.querySelectorAll('[class*="product"], [class*="card"]');
+                    const cards = document.querySelectorAll('[class*="product"], [class*="card"], [class*="plp"]');
                     for (const card of cards) {
                         if (items.length >= maxResults) break;
 
                         const text = card.innerText || '';
-                        const priceMatch = text.match(/₹\s*([\d,]+)/);
+                        const priceMatch = text.match(/₹\s*([\d,.]+)/);
                         if (!priceMatch) continue;
 
-                        const price = parseInt(priceMatch[1].replace(/,/g, ''), 10);
+                        const price = parseInt(priceMatch[1].replace(/[^\d]/g, ''), 10);
                         if (!price || price < 100) continue;
 
                         const link = card.querySelector('a');
                         if (!link) continue;
+                        if (!/\/(?:product|p)\//i.test(link.href || '')) continue;
 
                         const title = link.getAttribute('title') || link.innerText?.split('\n')[0]?.trim() || '';
                         if (!title || title.length < 5) continue;

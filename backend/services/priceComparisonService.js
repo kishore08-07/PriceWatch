@@ -120,12 +120,50 @@ function buildQueryVariants(product) {
     // Use cleaned title (not raw) to avoid passing marketing noise as a fallback query.
     const cleanTitle = stripMarketingNoise(product.title || '').replace(/\s+/g, ' ').trim();
     const brandModel = [product.brand, product.model].filter(Boolean).join(' ').trim();
+    const compactTitle = cleanTitle
+        .replace(/\b\d+\s*(gb|tb|mb|ram|rom|storage)\b/gi, ' ')
+        .replace(/\b(storage|internal|memory|mobile|phone|smartphone)\b/gi, ' ')
+        .replace(/\s{2,}/g, ' ')
+        .trim();
+    const compactWithoutBrandPrefix = product.brand
+        ? compactTitle.replace(new RegExp(`^${String(product.brand).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s+`, 'i'), '')
+        : compactTitle;
+    const brandPlusCore = [product.brand, compactWithoutBrandPrefix]
+        .filter(Boolean)
+        .join(' ')
+        .replace(/\s{2,}/g, ' ')
+        .trim();
 
-    const variants = [base, brandModel, cleanTitle]
+    const brandLower = (product.brand || '').trim().toLowerCase();
+
+    const variants = [base, compactTitle, brandPlusCore, cleanTitle, brandModel]
         .map((q) => (q || '').trim())
-        .filter((q) => q.length >= 3);
+        .filter((q) => q.length >= 3)
+        .filter((q) => {
+            const tokens = q.split(/\s+/).filter(Boolean);
+            // Drop overly generic queries like just "Google"
+            if (tokens.length < 2 && !/\d/.test(q)) return false;
+            if (brandLower && q.toLowerCase() === brandLower) return false;
+            return true;
+        });
 
-    return [...new Set(variants)].slice(0, 3);
+    const unique = [...new Set(variants)];
+    if (unique.length === 0 && cleanTitle) return [cleanTitle];
+    return unique.slice(0, 4);
+}
+
+function withTimeout(promise, timeoutMs, label) {
+    let timer = null;
+    const timeoutPromise = new Promise((resolve) => {
+        timer = setTimeout(() => {
+            console.warn(`[PriceComparison] ${label} timed out after ${timeoutMs}ms`);
+            resolve([]);
+        }, timeoutMs);
+    });
+
+    return Promise.race([promise, timeoutPromise]).finally(() => {
+        if (timer) clearTimeout(timer);
+    });
 }
 
 /**
@@ -161,19 +199,62 @@ async function searchAndMatch(platform, queries, sourceProduct) {
     }
 
     try {
-        const candidateBuckets = await Promise.all(
-            queries.map((q) => scraper(q).catch(() => []))
-        );
-        const candidates = candidateBuckets
-            .flat()
-            .filter(Boolean)
-            .filter((c) => c.title && c.url);
+        const timeoutMs = platform === 'Reliance Digital' ? 15000 : 12000;
+        const queryPlan = (platform === 'Reliance Digital' ? queries.slice(0, 3) : queries.slice(0, 3));
 
-        const deduped = [];
         const seen = new Set();
-        for (const c of candidates) {
-            const key = `${(c.url || '').split('?')[0]}::${(c.title || '').toLowerCase()}`;
-            if (!seen.has(key)) {
+        const deduped = [];
+
+        for (const q of queryPlan) {
+            const scraperPromise = platform === 'Reliance Digital'
+                ? scraper(q, { browserFallback: false }).catch(() => [])
+                : scraper(q).catch(() => []);
+
+            const batch = await withTimeout(
+                scraperPromise,
+                timeoutMs,
+                `${platform} query "${q}"`
+            );
+
+            for (const c of (batch || [])) {
+                if (!c || !c.title || !c.url) continue;
+                const key = `${(c.url || '').split('?')[0]}::${(c.title || '').toLowerCase()}`;
+                if (seen.has(key)) continue;
+                seen.add(key);
+                deduped.push(c);
+            }
+
+            if (deduped.length === 0) continue;
+
+            // Early exit when a strong match is already found.
+            const early = matchProduct(sourceProduct, deduped);
+            if (early && early.matchConfidence >= 0.52) {
+                return {
+                    platform: early.platform || platform,
+                    price: normalizePrice(early.price),
+                    availability: early.availability || 'Unknown',
+                    url: early.url || null,
+                    matchConfidence: early.matchConfidence || 0,
+                    title: early.title || null,
+                    rating: early.rating || null,
+                    error: null
+                };
+            }
+        }
+
+        // Reliance browser fallback is expensive; run only once if API-only attempts found nothing.
+        if (platform === 'Reliance Digital' && deduped.length === 0 && queryPlan.length > 0) {
+            const fallbackQuery = queryPlan.find((q) => /\d/.test(q)) || queryPlan[0];
+            const fallbackBatch = await withTimeout(
+                scraper(fallbackQuery, { browserFallback: true }).catch(() => []),
+                timeoutMs,
+                `${platform} browser fallback "${fallbackQuery}"`
+            );
+
+            for (const c of (fallbackBatch || [])) {
+                if (!c || !c.title || !c.url) continue;
+                const key = `${(c.url || '').split('?')[0]}::${(c.title || '').toLowerCase()}`;
+                if (seen.has(key)) continue;
                 seen.add(key);
                 deduped.push(c);
             }
