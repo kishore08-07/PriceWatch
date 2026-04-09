@@ -617,5 +617,4 @@ REQUEST_TIMEOUT_SECS = 300                    # 5 minute timeout
 ### "Reviews not analyzing"
 - Check circuit breaker state: `/api/reviews/health`
 - Verify Python service is accessible: `curl http://localhost:5001/health`
-- Check review payload size: Max 2000 reviews per request
 
